@@ -16,6 +16,34 @@ const initialBomData = {
   huawei: [],
 };
 const MODEL_ID = "ft:gpt-4o-2024-08-06:bamboofernfoo:final:CUH4BvSo";
+const GENERIC_API_ERROR =
+  "ระบบ API ตอบกลับไม่ถูกต้อง กรุณาตรวจสอบการตั้งค่า Vercel Functions และลองใหม่อีกครั้ง";
+
+const parseApiResponse = async (res) => {
+  const raw = await res.text();
+  if (!raw) return { data: null, raw: "" };
+
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
+  if (contentType.includes("application/json")) {
+    try {
+      return { data: JSON.parse(raw), raw };
+    } catch {
+      return { data: null, raw };
+    }
+  }
+
+  try {
+    return { data: JSON.parse(raw), raw };
+  } catch {
+    return { data: null, raw };
+  }
+};
+
+const formatApiFailure = (res, raw) => {
+  const sample = (raw || "").replace(/\s+/g, " ").slice(0, 120);
+  const hint = sample ? ` (${sample}${sample.length >= 120 ? "..." : ""})` : "";
+  return `${GENERIC_API_ERROR} [HTTP ${res.status}]${hint}`;
+};
 
 export default function App() {
   const [currentView, setCurrentView] = useState("dashboard");
@@ -248,8 +276,7 @@ export default function App() {
           model: MODEL_ID,
         }),
       });
-      const raw = await res.text();
-      const data = raw ? JSON.parse(raw) : null;
+      const { data, raw } = await parseApiResponse(res);
       if (data?.bom) {
         setBomData(data.bom);
       }
@@ -257,7 +284,7 @@ export default function App() {
       const serverDetails = data?.details;
       const fallbackError =
         !res.ok && !serverError && !serverDetails
-          ? `Request failed (HTTP ${res.status})`
+          ? formatApiFailure(res, raw)
           : null;
       setChatHistory([
         {
@@ -329,13 +356,12 @@ export default function App() {
           model: MODEL_ID,
         }),
       });
-      const raw = await res.text();
-      const data = raw ? JSON.parse(raw) : null;
+      const { data, raw } = await parseApiResponse(res);
       const serverError = data?.error;
       const serverDetails = data?.details;
       const fallbackError =
         !res.ok && !serverError && !serverDetails
-          ? `Request failed (HTTP ${res.status})`
+          ? formatApiFailure(res, raw)
           : null;
       if (data?.bom) {
         setBomData(data.bom);
