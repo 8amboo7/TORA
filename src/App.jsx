@@ -4,10 +4,291 @@ import Tesseract from "tesseract.js";
 import JSZip from "jszip";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
+import toraLogo from "./assets/tora-logo.png";
+
+let mermaidLoader = null;
+
+const loadMermaid = () => {
+  if (typeof window === "undefined")
+    return Promise.reject(new Error("No window"));
+  if (window.mermaid) return Promise.resolve(window.mermaid);
+  if (mermaidLoader) return mermaidLoader;
+
+  mermaidLoader = new Promise((resolve, reject) => {
+    const existing = document.querySelector(
+      'script[data-mermaid-loader="true"]',
+    );
+    if (existing) {
+      existing.addEventListener("load", () => resolve(window.mermaid), {
+        once: true,
+      });
+      existing.addEventListener("error", reject, { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js";
+    script.async = true;
+    script.dataset.mermaidLoader = "true";
+    script.onload = () => resolve(window.mermaid);
+    script.onerror = () => reject(new Error("Failed to load mermaid"));
+    document.head.appendChild(script);
+  });
+
+  return mermaidLoader;
+};
+
+const getProviderLabel = (provider) => {
+  if (provider === "aws") return "AWS";
+  if (provider === "azure") return "Azure";
+  if (provider === "huawei") return "Huawei Cloud";
+  return "Cloud";
+};
+
+const sanitizeMermaidText = (value) =>
+  String(value || "")
+    .replace(/"/g, "'")
+    .replace(/\r?\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const truncateText = (value, limit = 64) => {
+  const text = sanitizeMermaidText(value);
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 3)}...`;
+};
+
+const toNodeLabel = (item) => {
+  const service = truncateText(item.service || "Unnamed Service", 42);
+  const spec = truncateText(item.spec || "", 46);
+  const qty = Number(item.qty || 0);
+  const unit = truncateText(item.unit || "", 16);
+  const parts = [service];
+  if (spec) parts.push(spec.slice(0, 70));
+  if (qty) parts.push(`Qty ${qty}${unit ? ` ${unit}` : ""}`);
+  return parts.join(" | ");
+};
+
+const buildCloudArchitectureMermaid = (provider, items = []) => {
+  if (!items.length) return "";
+
+  const providerLabel = getProviderLabel(provider);
+  const nextId = (() => {
+    let i = 1;
+    return (prefix) => `${prefix}${i++}`;
+  })();
+  const createNode = (prefix, label) => ({
+    id: nextId(prefix),
+    label: truncateText(label, 72),
+  });
+  const includesAny = (text, words) =>
+    words.some((word) => text.includes(word));
+
+  const edgeNodes = [];
+  const publicSubnet = [];
+  const appSubnet = [];
+  const dataSubnet = [];
+  const sharedServices = [];
+
+  for (const item of items) {
+    const category = sanitizeMermaidText(item.category).toLowerCase();
+    const serviceText =
+      `${sanitizeMermaidText(item.service)} ${sanitizeMermaidText(item.spec)}`.toLowerCase();
+    const label = toNodeLabel(item);
+
+    if (
+      category === "security" &&
+      includesAny(serviceText, ["waf", "ddos", "firewall", "anti", "shield"])
+    ) {
+      edgeNodes.push(createNode("edge", label));
+      continue;
+    }
+
+    if (
+      category === "network" &&
+      includesAny(serviceText, [
+        "load balancer",
+        "elb",
+        "alb",
+        "nat",
+        "gateway",
+        "eip",
+      ])
+    ) {
+      publicSubnet.push(createNode("pub", label));
+      continue;
+    }
+
+    if (category === "compute") {
+      appSubnet.push(createNode("app", label));
+      continue;
+    }
+
+    if (category === "database" || category === "storage") {
+      dataSubnet.push(createNode("data", label));
+      continue;
+    }
+
+    if (
+      category === "security" ||
+      category === "management" ||
+      category === "support" ||
+      category === "one-time" ||
+      category === "network"
+    ) {
+      sharedServices.push(createNode("svc", label));
+      continue;
+    }
+
+    appSubnet.push(createNode("app", label));
+  }
+
+  if (!edgeNodes.length)
+    edgeNodes.push(createNode("edge", "WAF / Edge Protection (planned)"));
+  if (!publicSubnet.length)
+    publicSubnet.push(createNode("pub", "Load Balancer / Gateway (planned)"));
+
+  if (appSubnet.length > 4) {
+    appSubnet.splice(4, appSubnet.length - 4);
+    appSubnet.push(createNode("app", "Additional application nodes"));
+  }
+  if (dataSubnet.length > 4) {
+    dataSubnet.splice(4, dataSubnet.length - 4);
+    dataSubnet.push(createNode("data", "Additional data services"));
+  }
+  if (sharedServices.length > 4) {
+    sharedServices.splice(4, sharedServices.length - 4);
+    sharedServices.push(createNode("svc", "Additional shared services"));
+  }
+
+  const lines = [
+    "flowchart TB",
+    `  title["${providerLabel} Architecture (from current BOM)"]`,
+    `  user["End Users"] --> dns["DNS / Domain"]`,
+    `  dns --> edgeEntry["Edge Entry"]`,
+    '  subgraph vpc["VPC / Virtual Network"]',
+    '    subgraph public_zone["Public Subnet"]',
+  ];
+
+  publicSubnet.forEach((node) =>
+    lines.push(`      ${node.id}["${node.label}"]`),
+  );
+  lines.push("    end");
+  lines.push('    subgraph app_zone["Application Subnet"]');
+  appSubnet.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
+  lines.push("    end");
+  lines.push('    subgraph data_zone["Data Subnet"]');
+  dataSubnet.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
+  lines.push("    end");
+  lines.push('    subgraph shared_zone["Shared Services"]');
+  sharedServices.forEach((node) =>
+    lines.push(`      ${node.id}["${node.label}"]`),
+  );
+  lines.push("    end");
+  lines.push("  end");
+  lines.push('  subgraph edge_zone["Edge Security"]');
+  edgeNodes.forEach((node) => lines.push(`    ${node.id}["${node.label}"]`));
+  lines.push("  end");
+
+  lines.push(`  edgeEntry --> ${edgeNodes[0].id}`);
+  for (let i = 0; i < edgeNodes.length - 1; i += 1) {
+    lines.push(`  ${edgeNodes[i].id} --> ${edgeNodes[i + 1].id}`);
+  }
+  lines.push(
+    `  ${edgeNodes[edgeNodes.length - 1].id} --> ${publicSubnet[0].id}`,
+  );
+
+  for (let i = 0; i < publicSubnet.length - 1; i += 1) {
+    lines.push(`  ${publicSubnet[i].id} --> ${publicSubnet[i + 1].id}`);
+  }
+
+  const publicExit = publicSubnet[publicSubnet.length - 1].id;
+  appSubnet.forEach((node) => lines.push(`  ${publicExit} --> ${node.id}`));
+
+  if (dataSubnet.length) {
+    appSubnet.forEach((appNode) => {
+      dataSubnet.forEach((dataNode) => {
+        lines.push(`  ${appNode.id} --> ${dataNode.id}`);
+      });
+    });
+  }
+
+  if (sharedServices.length) {
+    const observed = [...appSubnet, ...dataSubnet];
+    if (observed.length) {
+      sharedServices.forEach((svcNode) => {
+        observed.forEach((node) => {
+          lines.push(`  ${svcNode.id} -.monitor/manage.-> ${node.id}`);
+        });
+      });
+    } else {
+      lines.push(`  ${publicExit} --> ${sharedServices[0].id}`);
+    }
+  }
+
+  lines.push(
+    "  classDef zone fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px,color:#0f172a;",
+    "  classDef core fill:#ffffff,stroke:#94a3b8,stroke-width:1px,color:#0f172a;",
+    "  class vpc,public_zone,app_zone,data_zone,shared_zone,edge_zone zone;",
+  );
+
+  return lines.join("\n");
+};
+
+const MermaidDiagram = ({ chart }) => {
+  const [svg, setSvg] = useState("");
+
+  useEffect(() => {
+    let isActive = true;
+    if (!chart) {
+      setSvg("");
+      return undefined;
+    }
+
+    const render = async () => {
+      try {
+        const mermaid = await loadMermaid();
+        if (!mermaid) return;
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "loose",
+          theme: "neutral",
+        });
+        const id = `mermaid-${Math.random().toString(36).slice(2)}`;
+        const { svg: output } = await mermaid.render(id, chart);
+        if (isActive) setSvg(output);
+      } catch {
+        if (isActive) setSvg("");
+      }
+    };
+
+    render();
+    return () => {
+      isActive = false;
+    };
+  }, [chart]);
+
+  if (!chart) return null;
+
+  if (!svg) {
+    return (
+      <pre className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded text-xs whitespace-pre-wrap text-gray-600">
+        {chart}
+      </pre>
+    );
+  }
+
+  return (
+    <div
+      className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded overflow-auto"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+};
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url
+  import.meta.url,
 ).toString();
 
 const initialBomData = {
@@ -44,6 +325,12 @@ const formatApiFailure = (res, raw) => {
   const hint = sample ? ` (${sample}${sample.length >= 120 ? "..." : ""})` : "";
   return `${GENERIC_API_ERROR} [HTTP ${res.status}]${hint}`;
 };
+
+const formatBaht = (value) =>
+  `${Number(value || 0).toLocaleString("th-TH", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} `;
 
 export default function App() {
   const [currentView, setCurrentView] = useState("dashboard");
@@ -192,11 +479,12 @@ export default function App() {
       return { text, warning: null };
     }
 
-    let warning = "ข้อความจาก DOCX น้อยเกินไป ระบบจะพยายาม OCR จากรูปภาพในเอกสาร";
+    let warning =
+      "ข้อความจาก DOCX น้อยเกินไป ระบบจะพยายาม OCR จากรูปภาพในเอกสาร";
     try {
       const zip = await JSZip.loadAsync(buffer);
       const mediaFiles = Object.keys(zip.files).filter((name) =>
-        name.startsWith("word/media/")
+        name.startsWith("word/media/"),
       );
       const limited = mediaFiles.slice(0, OCR_MAX_IMAGES);
       if (limited.length === 0) {
@@ -249,7 +537,7 @@ export default function App() {
       const fallback = isPlainText ? await readTextFile(file) : null;
       setExtractedText(
         fallback ||
-          `ไม่สามารถอ่านไฟล์ได้: ${error.message}\n\nโปรดคัดลอกเนื้อหา TOR มาวางที่นี่เพื่อแก้ไข`
+          `ไม่สามารถอ่านไฟล์ได้: ${error.message}\n\nโปรดคัดลอกเนื้อหา TOR มาวางที่นี่เพื่อแก้ไข`,
       );
       setCurrentView("review");
     } finally {
@@ -363,6 +651,7 @@ export default function App() {
         !res.ok && !serverError && !serverDetails
           ? formatApiFailure(res, raw)
           : null;
+      const nextBom = data?.bom || bomData;
       if (data?.bom) {
         setBomData(data.bom);
       }
@@ -374,7 +663,6 @@ export default function App() {
         fallbackError ||
         (res.ok ? "Noted." : "Unable to process the request.") ||
         "Noted. I can adjust compute sizing, storage, or redundancy levels if you want a different cost profile.";
-
       setIsChatWaiting(false);
       setIsChatTyping(true);
       if (typingTimerRef.current) {
@@ -448,8 +736,19 @@ export default function App() {
       workbook,
       `BOM_Export_${activeTab.toUpperCase()}_${new Date()
         .toISOString()
-        .slice(0, 10)}.xlsx`
+        .slice(0, 10)}.xlsx`,
     );
+  };
+
+  const handleClearChat = () => {
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = null;
+    }
+    setIsChatWaiting(false);
+    setIsChatTyping(false);
+    setChatHistory([]);
+    setTextareaKey((prev) => prev + 1);
   };
 
   const Navbar = () => (
@@ -458,9 +757,7 @@ export default function App() {
         className="flex items-center gap-3 cursor-pointer"
         onClick={() => setCurrentView("dashboard")}
       >
-        <div className="w-9 h-9 bg-[#0f172a] rounded-lg flex items-center justify-center text-white shadow-md">
-          <i className="fas fa-cube"></i>
-        </div>
+        <img src={toraLogo} alt="TORA logo" className="w-9 h-9 rounded-lg object-cover shadow-md" />
         <div className="flex flex-col">
           <h1 className="font-bold text-lg tracking-tight text-gray-900 leading-none">
             TORA
@@ -503,27 +800,33 @@ export default function App() {
       <div className="max-w-5xl mx-auto px-6 py-8">
         <div className="mb-10 border-b border-gray-200 pb-6">
           <h1 className="text-3xl font-bold text-[#0f172a] mb-2">
-            Platform Documentation
+            User Manual
           </h1>
           <p className="text-gray-500 text-lg">
-            Comprehensive guide for integrating and using TORA Enterprise
-            Platform.
+            Detailed guide for using TORA from document upload to BOM analysis,
+            comparison, and export across AWS, Azure, and Huawei Cloud.
           </p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
           <div className="space-y-1">
             <a
-              href="#getting-started"
+              href="#quick-start"
               className="block px-3 py-2 rounded-md bg-white font-medium text-[#0f172a] border border-gray-200 shadow-sm"
             >
-              Getting Started
+              Quick Start
             </a>
             <a
-              href="#core-features"
+              href="#workflow"
               className="block px-3 py-2 rounded-md text-gray-600 hover:bg-gray-100 hover:text-gray-900 transition-colors"
             >
-              Core Features
+              Workflow
+            </a>
+            <a
+              href="#chat-guide"
+              className="block px-3 py-2 rounded-md text-gray-600 hover:bg-gray-100 hover:text-gray-900 transition-colors"
+            >
+              Chat Guide
             </a>
             <a
               href="#api-reference"
@@ -532,147 +835,241 @@ export default function App() {
               API Reference
             </a>
             <a
-              href="#support"
+              href="#troubleshooting"
               className="block px-3 py-2 rounded-md text-gray-600 hover:bg-gray-100 hover:text-gray-900 transition-colors"
             >
-              Support & FAQ
+              Troubleshooting
             </a>
           </div>
 
           <div className="md:col-span-3 space-y-12">
-            <section id="getting-started" className="scroll-mt-24">
+            <section id="quick-start" className="scroll-mt-24">
               <h2 className="text-2xl font-bold text-[#0f172a] mb-4 flex items-center gap-2">
-                <i className="fas fa-play-circle text-[#0f172a]"></i> Getting
-                Started
+                <i className="fas fa-rocket text-[#0f172a]"></i> Quick Start
               </h2>
-              <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm space-y-4">
+              <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm space-y-5">
                 <p className="text-gray-600">
-                  TORA simplifies the complex process of cloud procurement by
-                  automating the conversion of Terms of Reference (TOR)
-                  documents into precise Bill of Materials (BOM).
+                  You can start in two main modes: Upload TOR (when you already
+                  have a document) or Interactive Chat (when you want to define
+                  requirements by text). TORA automatically generates
+                  provider-based BOM tables and monthly/yearly cost summaries.
                 </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {[
                     {
-                      title: "Upload TOR",
-                      body:
-                        "Upload PDF or DOCX file containing technical requirements.",
+                      title: "1) Upload or Chat",
+                      body: "Start by uploading a TOR file or entering requirements directly in chat.",
                     },
                     {
-                      title: "AI Analysis",
-                      body:
-                        "Our engine extracts specs and matches them with cloud services.",
+                      title: "2) Review Analysis Input",
+                      body: "Edit extracted text before Analyze to improve BOM accuracy.",
                     },
                     {
-                      title: "Export BOM",
-                      body:
-                        "Download the comparative cost analysis in CSV/Excel format.",
+                      title: "3) Compare & Export",
+                      body: "Switch AWS/Azure/Huawei tabs to compare pricing, then export to .xlsx.",
                     },
-                  ].map((step, index) => (
+                  ].map((step) => (
                     <div
                       key={step.title}
-                      className="p-4 bg-gray-50 rounded border border-gray-100 text-center hover:border-[#0f172a]/30 transition-colors"
+                      className="p-4 bg-gray-50 rounded border border-gray-100"
                     >
-                      <div className="w-8 h-8 bg-slate-100 text-[#0f172a] rounded-full flex items-center justify-center mx-auto mb-2 font-bold">
-                        {index + 1}
-                      </div>
-                      <h4 className="font-semibold text-gray-800">
+                      <h4 className="font-semibold text-gray-800 mb-1">
                         {step.title}
                       </h4>
-                      <p className="text-xs text-gray-500 mt-1">{step.body}</p>
+                      <p className="text-xs text-gray-500">{step.body}</p>
                     </div>
                   ))}
+                </div>
+                <div className="rounded-lg bg-slate-50 border border-slate-200 p-4 text-sm text-gray-600">
+                  <p className="font-semibold text-gray-800 mb-1">
+                    Recommended file types
+                  </p>
+                  <p>
+                    Text extraction supports <code>.pdf</code>,{" "}
+                    <code>.docx</code>, <code>.txt</code>, <code>.md</code>,{" "}
+                    <code>.csv</code>, and <code>.json</code>. You can also
+                    attach files in chat. If extracted text is too short, OCR is
+                    applied automatically.
+                  </p>
                 </div>
               </div>
             </section>
 
-            <section id="core-features" className="scroll-mt-24">
+            <section id="workflow" className="scroll-mt-24">
               <h2 className="text-2xl font-bold text-[#0f172a] mb-4 flex items-center gap-2">
-                <i className="fas fa-microchip text-[#0f172a]"></i> Technology
-                Stack
+                <i className="fas fa-list-check text-[#0f172a]"></i> Workflow
               </h2>
-              <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm">
-                <ul className="space-y-4 text-sm text-gray-600">
-                  {[
-                    {
-                      title: "Hybrid AI Engine",
-                      body:
-                        "Combines prompt engineering for broad understanding and fine-tuned models for specific government/enterprise terminology.",
-                    },
-                    {
-                      title: "Real-time Pricing (RAG)",
-                      body:
-                        "Retrieval-Augmented Generation ensures pricing data is fetched from the latest vector database indices of AWS, Azure, and Huawei Cloud.",
-                    },
-                    {
-                      title: "Multi-Cloud Comparison",
-                      body:
-                        "Automatically normalizes specifications across providers to ensure a fair comparison.",
-                    },
-                  ].map((item) => (
-                    <li key={item.title} className="flex gap-3">
-                      <i className="fas fa-check-circle text-green-600 mt-1"></i>
-                      <div>
-                        <strong className="text-gray-900 block">
-                          {item.title}
-                        </strong>
-                        {item.body}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
+              <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm space-y-4">
+                {[
+                  {
+                    title: "Step 1: Prepare TOR content",
+                    body: "If requirements are split across multiple documents, combine compute, storage, network, security, and SLA details into one source for better analysis.",
+                  },
+                  {
+                    title: "Step 2: Review extracted text",
+                    body: "In the Review page, remove irrelevant text (for example footers/page numbers) and add key constraints such as region, instance count, and expected growth.",
+                  },
+                  {
+                    title: "Step 3: Confirm & Analyze",
+                    body: "The app sends your content to /api/analyze and generates BOM data for aws, azure, and huawei with a summary response.",
+                  },
+                  {
+                    title: "Step 4: Validate BOM in Workspace",
+                    body: "Review service name, specs, quantity, unit price, total cost, and the BEST PRICE badge to identify the current lowest-cost provider.",
+                  },
+                  {
+                    title: "Step 5: Refine BOM via chat",
+                    body: "Send requests like adding RAM, changing disk class, adding a DR site, or updating instance counts. The system regenerates BOM based on your latest input.",
+                  },
+                  {
+                    title: "Step 6: Export report",
+                    body: "Click Export BOM to download an .xlsx file for the active provider tab, with provider name and date in the filename.",
+                  },
+                ].map((item) => (
+                  <div
+                    key={item.title}
+                    className="rounded-lg border border-gray-100 bg-gray-50 p-4"
+                  >
+                    <h4 className="font-semibold text-gray-800 mb-1">
+                      {item.title}
+                    </h4>
+                    <p className="text-sm text-gray-600">{item.body}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section id="chat-guide" className="scroll-mt-24">
+              <h2 className="text-2xl font-bold text-[#0f172a] mb-4 flex items-center gap-2">
+                <i className="fas fa-comments text-[#0f172a]"></i> Chat Guide
+              </h2>
+              <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm space-y-4 text-sm text-gray-600">
+                <p>
+                  Use chat for incremental BOM updates. On each request, the app
+                  sends message history and current BOM state to{" "}
+                  <code>/api/chat</code>.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="rounded-lg border border-green-100 bg-green-50 p-4">
+                    <p className="font-semibold text-green-800 mb-2">
+                      Good prompt examples
+                    </p>
+                    <ul className="space-y-1 text-green-900/90">
+                      <li>- Increase app VMs to 4 instances.</li>
+                      <li>- Change database disk to 2TB SSD.</li>
+                      <li>- Add WAF and set backup retention to 30 days.</li>
+                      <li>- Provide the lowest-cost option under the same SLA.</li>
+                    </ul>
+                  </div>
+                  <div className="rounded-lg border border-amber-100 bg-amber-50 p-4">
+                    <p className="font-semibold text-amber-800 mb-2">
+                      Accuracy tips
+                    </p>
+                    <ul className="space-y-1 text-amber-900/90">
+                      <li>- Specify instance counts and runtime assumptions.</li>
+                      <li>- Keep region consistent across providers.</li>
+                      <li>- Include compliance/security constraints.</li>
+                      <li>- Clarify whether you need CapEx or OpEx framing.</li>
+                    </ul>
+                  </div>
+                </div>
               </div>
             </section>
 
             <section id="api-reference" className="scroll-mt-24">
               <h2 className="text-2xl font-bold text-[#0f172a] mb-4 flex items-center gap-2">
-                <i className="fas fa-code text-[#0f172a]"></i> API Integration
-              </h2>
-              <div className="bg-[#1e1e1e] rounded-lg overflow-hidden shadow-lg border border-gray-800">
-                <div className="flex items-center justify-between px-4 py-2 bg-[#2d2d2d] border-b border-gray-700">
-                  <span className="text-xs text-gray-400 font-mono">
-                    POST /api/v1/analyze
-                  </span>
-                  <span className="text-xs text-gray-500">Node.js</span>
-                </div>
-                <div className="p-4 overflow-x-auto">
-                  <pre>
-                    <code className="language-javascript text-sm font-mono text-gray-300">
-                      {`const axios = require('axios');\nconst fs = require('fs');\n\nasync function analyzeTOR() {\n  const form = new FormData();\n  form.append('file', fs.createReadStream('./tor-document.pdf'));\n  \n  try {\n    const response = await axios.post('https://api.tora.platform/v1/analyze', form, {\n      headers: {\n        'Authorization': 'Bearer YOUR_API_KEY',\n        ...form.getHeaders()\n      }\n    });\n\n    console.log('Analysis Result:', response.data.bom_comparison);\n  } catch (error) {\n    console.error('Error:', error.message);\n  }\n}\n\nanalyzeTOR();`}
-                    </code>
-                  </pre>
-                </div>
-              </div>
-              <p className="text-sm text-gray-500 mt-3">
-                Authentication requires an Enterprise API Key. Rate limits apply
-                based on your subscription tier.
-              </p>
-            </section>
-
-            <section id="support" className="scroll-mt-24">
-              <h2 className="text-2xl font-bold text-[#0f172a] mb-4">
-                Support & FAQ
+                <i className="fas fa-code text-[#0f172a]"></i> API Reference
               </h2>
               <div className="space-y-4">
-                {["How often is pricing data updated?", "Can I customize the export format?"]
-                  .map((question, index) => (
-                    <details
-                      key={question}
-                      className="group bg-white rounded-lg border border-gray-200"
-                    >
-                      <summary className="flex justify-between items-center font-medium cursor-pointer list-none p-4 group-open:bg-gray-50 transition-colors">
-                        <span>{question}</span>
-                        <span className="transition group-open:rotate-180">
-                          <i className="fas fa-chevron-down text-gray-400"></i>
-                        </span>
-                      </summary>
-                      <div className="text-gray-600 text-sm p-4 pt-0 border-t border-transparent group-open:border-gray-100 group-open:pt-4">
-                        {index === 0
-                          ? "Our pricing index is refreshed daily for all supported cloud providers."
-                          : "Yes, Enterprise users can define custom CSV/JSON schemas or integrate with ERP systems."}
-                      </div>
-                    </details>
-                  ))}
+                <div className="bg-[#1e1e1e] rounded-lg overflow-hidden shadow-lg border border-gray-800">
+                  <div className="flex items-center justify-between px-4 py-2 bg-[#2d2d2d] border-b border-gray-700">
+                    <span className="text-xs text-gray-400 font-mono">
+                      POST /api/analyze
+                    </span>
+                    <span className="text-xs text-gray-500">JSON</span>
+                  </div>
+                  <div className="p-4 overflow-x-auto">
+                    <pre>
+                      <code className="language-javascript text-xs font-mono text-gray-300">
+                        {`{
+  "text": "TOR content...",
+  "model": "ft:gpt-4o-2024-08-06:bamboofernfoo:final:CUH4BvSo"
+}`}
+                      </code>
+                    </pre>
+                  </div>
+                </div>
+
+                <div className="bg-[#1e1e1e] rounded-lg overflow-hidden shadow-lg border border-gray-800">
+                  <div className="flex items-center justify-between px-4 py-2 bg-[#2d2d2d] border-b border-gray-700">
+                    <span className="text-xs text-gray-400 font-mono">
+                      POST /api/chat
+                    </span>
+                    <span className="text-xs text-gray-500">JSON</span>
+                  </div>
+                  <div className="p-4 overflow-x-auto">
+                    <pre>
+                      <code className="language-javascript text-xs font-mono text-gray-300">
+                        {`{
+  "messages": [{ "role": "user", "content": "..." }],
+  "bom": { "aws": [], "azure": [], "huawei": [] },
+  "model": "ft:gpt-4o-2024-08-06:bamboofernfoo:final:CUH4BvSo"
+}`}
+                      </code>
+                    </pre>
+                  </div>
+                </div>
+
+                <p className="text-sm text-gray-500">
+                  Note: Internal APIs require <code>OPENAI_API_KEY</code> on the
+                  server before use. BOM outputs are generated in THB based on
+                  the system pricing rules.
+                </p>
+              </div>
+            </section>
+
+            <section id="troubleshooting" className="scroll-mt-24">
+              <h2 className="text-2xl font-bold text-[#0f172a] mb-4">
+                Troubleshooting & FAQ
+              </h2>
+              <div className="space-y-4">
+                {[
+                  {
+                    question: "Uploaded file returns too little or noisy text",
+                    answer:
+                      "OCR is applied when extracted text is very short. If scan quality is poor, convert the file to plain text first or fix the content in the Review page before analyzing.",
+                  },
+                  {
+                    question: "Chat is slow or BOM is not updated",
+                    answer:
+                      "Check API response health and verify the payload contains aws/azure/huawei keys. If input is vague, provide more specific requirements.",
+                  },
+                  {
+                    question: "Pricing looks different from expectation",
+                    answer:
+                      "Review assumptions in the specs, such as region, monthly runtime hours, and resource quantities before comparing providers.",
+                  },
+                  {
+                    question: "Data disappears after clicking New Analysis",
+                    answer:
+                      "This button clears chat history immediately to start a fresh analysis. Export BOM first if you need to keep the current result.",
+                  },
+                ].map((item) => (
+                  <details
+                    key={item.question}
+                    className="group bg-white rounded-lg border border-gray-200"
+                  >
+                    <summary className="flex justify-between items-center font-medium cursor-pointer list-none p-4 group-open:bg-gray-50 transition-colors">
+                      <span>{item.question}</span>
+                      <span className="transition group-open:rotate-180">
+                        <i className="fas fa-chevron-down text-gray-400"></i>
+                      </span>
+                    </summary>
+                    <div className="text-gray-600 text-sm p-4 pt-0 border-t border-transparent group-open:border-gray-100 group-open:pt-4">
+                      {item.answer}
+                    </div>
+                  </details>
+                ))}
               </div>
             </section>
           </div>
@@ -781,7 +1178,9 @@ export default function App() {
       <div className="py-20 bg-white border-y border-gray-100">
         <div className="max-w-6xl mx-auto px-6">
           <div className="text-center mb-16">
-            <h2 className="text-3xl font-bold text-[#0f172a] mb-4">Why TORA?</h2>
+            <h2 className="text-3xl font-bold text-[#0f172a] mb-4">
+              Why TORA?
+            </h2>
             <p className="text-gray-500">
               Cut expert procurement time by more than 80% with automation.
             </p>
@@ -793,24 +1192,21 @@ export default function App() {
                 color: "text-blue-600",
                 bg: "bg-blue-100",
                 title: "AI-Powered Analysis",
-                body:
-                  "Analyze TOR documents with advanced LLMs that understand technical and procurement-specific language.",
+                body: "Analyze TOR documents with advanced LLMs that understand technical and procurement-specific language.",
               },
               {
                 icon: "fas fa-tags",
                 color: "text-purple-600",
                 bg: "bg-purple-100",
                 title: "Real-time Pricing",
-                body:
-                  "Connect to the latest pricing data from AWS, Azure, and Huawei Cloud through RAG for maximum accuracy.",
+                body: "Connect to the latest pricing data from AWS, Azure, and Huawei Cloud through RAG for maximum accuracy.",
               },
               {
                 icon: "fas fa-table",
                 color: "text-green-600",
                 bg: "bg-green-100",
                 title: "Instant BOM",
-                body:
-                  "Generate BOM tables with automatic cost comparison and export-ready outputs.",
+                body: "Generate BOM tables with automatic cost comparison and export-ready outputs.",
               },
             ].map((card) => (
               <div
@@ -922,9 +1318,7 @@ export default function App() {
       <footer className="bg-white border-t border-gray-200 py-12">
         <div className="max-w-6xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-6">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-[#0f172a] rounded-lg flex items-center justify-center text-white">
-              <i className="fas fa-cube text-xs"></i>
-            </div>
+            <img src={toraLogo} alt="TORA logo" className="w-8 h-8 rounded-lg object-cover" />
             <span className="font-bold text-[#0f172a] tracking-tight">
               TORA Platform
             </span>
@@ -954,17 +1348,10 @@ export default function App() {
     return (
       <div className="pt-16 h-screen flex flex-col bg-gray-50/50">
         <div className="bg-white border-b border-gray-200 px-6 py-3 flex justify-between items-center shadow-sm z-10">
-          <div className="flex items-center gap-4">
-            <span className="text-sm font-medium text-gray-600">
-              Project:{" "}
-              <span className="text-gray-900 font-semibold">
-                {projectTitle || "Untitled Project"}
-              </span>
-            </span>
-          </div>
+          <div></div>
           <div className="flex gap-3">
             <button
-              onClick={() => setCurrentView("dashboard")}
+              onClick={handleClearChat}
               className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 border border-transparent hover:border-gray-200 rounded-md transition-all"
             >
               New Analysis
@@ -1096,7 +1483,8 @@ export default function App() {
                       : "border-transparent text-gray-500 hover:text-gray-700"
                   }`}
                 >
-                  <i className={`${cloud.icon} ${cloud.color}`}></i> {cloud.label}
+                  <i className={`${cloud.icon} ${cloud.color}`}></i>{" "}
+                  {cloud.label}
                   {cheapest === cloud.id && (
                     <span className="ml-1 bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded-full font-bold">
                       BEST PRICE
@@ -1152,10 +1540,10 @@ export default function App() {
                           {item.qty}
                         </td>
                         <td className="px-6 py-4 text-right text-gray-600">
-                          {item.price}
+                          {formatBaht(item.price)}
                         </td>
                         <td className="px-6 py-4 text-right font-bold text-gray-900">
-                          {item.total}
+                          {formatBaht(item.total)}
                         </td>
                       </tr>
                     ))}
@@ -1176,7 +1564,7 @@ export default function App() {
                               : "text-gray-900"
                           }`}
                         >
-                          ${getTotal(activeTab)}
+                          ฿{formatBaht(getTotal(activeTab))} บาท
                         </span>
                       </td>
                     </tr>
@@ -1189,12 +1577,24 @@ export default function App() {
                       </td>
                       <td className="px-6 py-4 text-right">
                         <span className="text-lg font-semibold text-gray-900">
-                          ${getYearlyTotal(activeTab)}
+                          ฿{formatBaht(getYearlyTotal(activeTab))}
                         </span>
                       </td>
                     </tr>
                   </tfoot>
                 </table>
+              </div>
+
+              <div className="mt-6 bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+                <div className="text-xs font-semibold text-gray-400 uppercase mb-2">
+                  Architecture Diagram
+                </div>
+                <MermaidDiagram
+                  chart={buildCloudArchitectureMermaid(
+                    activeTab,
+                    bomData[activeTab] || [],
+                  )}
+                />
               </div>
 
               <div className="mt-6 flex gap-4">
@@ -1207,10 +1607,10 @@ export default function App() {
                     {!cheapest
                       ? "ยังไม่มีข้อมูลราคาครบทุกเจ้า กรุณาระบุสเปกหรือจำนวนเพิ่มเติมเพื่อเปรียบเทียบต้นทุนได้แม่นยำขึ้น"
                       : cheapest === "huawei"
-                      ? "Huawei Cloud offers the most competitive pricing for Compute instances in this region."
-                      : cheapest === "aws"
-                      ? "AWS provides the best value for Storage-heavy workloads."
-                      : "Azure Hybrid Benefit could further reduce costs if you have existing Windows licenses."}
+                        ? "Huawei Cloud offers the most competitive pricing for Compute instances in this region."
+                        : cheapest === "aws"
+                          ? "AWS provides the best value for Storage-heavy workloads."
+                          : "Azure Hybrid Benefit could further reduce costs if you have existing Windows licenses."}
                   </p>
                 </div>
               </div>
