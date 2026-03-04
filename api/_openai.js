@@ -1,7 +1,18 @@
+import {
+  getLastUserMessageText,
+  isNationalScaleRequest,
+  shouldLockBomForChat,
+} from "./_capacityPolicy.js";
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
+const PROMPT_ID =
+  process.env.OPENAI_PROMPT_ID ||
+  "pmpt_6964c225bd488193a15045e75d0e25680790c8d1f4a7f51a";
+const PROMPT_VERSION = process.env.OPENAI_PROMPT_VERSION || "7";
 
-export const jsonResponse = (res, status, payload) => res.status(status).json(payload);
+export const jsonResponse = (res, status, payload) =>
+  res.status(status).json(payload);
 
 export const parseJsonBody = async (req) => {
   if (req.body && typeof req.body === "object") return req.body;
@@ -53,6 +64,8 @@ const buildSystemPrompt = () =>
     "Rules:",
     "- summary must be 2-4 sentences, starting politely, and act like customer service.",
     "- summary must briefly restate the key requirements from TOR (2-4 key points).",
+    "- If user does not specify region, default region assumptions are: AWS=Asia Pacific (Thailand), Huawei Cloud=Thailand (Bangkok), Azure=Southeast Asia (Singapore).",
+    "- If user explicitly specifies a region, that user region overrides all defaults.",
     "- summary must mention cheapest provider with reason, key assumptions (FX=33, 730 hrs),",
     "  and offer at least 1 recommendation + 1 follow-up question.",
     "- Always provide BOM items for ALL 3 providers (aws/azure/huawei).",
@@ -71,9 +84,18 @@ const buildSchema = () => ({
       type: "object",
       additionalProperties: false,
       properties: {
-        aws: { type: "array", minItems: 1, items: { $ref: "#/definitions/item" } },
-        azure: { type: "array", minItems: 1, items: { $ref: "#/definitions/item" } },
-        huawei: { type: "array", minItems: 1, items: { $ref: "#/definitions/item" } },
+        aws: {
+          type: "array",
+          items: { $ref: "#/definitions/item" },
+        },
+        azure: {
+          type: "array",
+          items: { $ref: "#/definitions/item" },
+        },
+        huawei: {
+          type: "array",
+          items: { $ref: "#/definitions/item" },
+        },
       },
       required: ["aws", "azure", "huawei"],
     },
@@ -92,7 +114,15 @@ const buildSchema = () => ({
         price: { type: "number" },
         total: { type: "number" },
       },
-      required: ["category", "service", "spec", "unit", "qty", "price", "total"],
+      required: [
+        "category",
+        "service",
+        "spec",
+        "unit",
+        "qty",
+        "price",
+        "total",
+      ],
     },
   },
 });
@@ -103,6 +133,11 @@ const buildResponseFormat = () => ({
   schema: buildSchema(),
   strict: true,
 });
+
+const NATIONAL_POLICY_HINT =
+  "Sizing policy: if requirement indicates nationwide Thailand usage, use NATIONAL baseline. Must include Multi-AZ/HA, Auto Scaling, DB Active/Standby + Read Replica, WAF, CDN, monitoring and non-trivial capacity.";
+const SMALLTALK_POLICY_HINT =
+  "If the latest user message is small talk or general conversation, reply naturally in Thai and do not modify BOM from Current BOM context.";
 
 export const safeParseJson = (text) => {
   if (!text || typeof text !== "string") return null;
@@ -126,7 +161,9 @@ export const extractOutput = (data) => {
   if (data.output_text) return data.output_text;
   if (!data.output) return "";
   return data.output
-    .map((output) => (output.content || []).map((chunk) => chunk.text || "").join(""))
+    .map((output) =>
+      (output.content || []).map((chunk) => chunk.text || "").join(""),
+    )
     .join("");
 };
 
@@ -157,25 +194,45 @@ export const callOpenAI = async (payload) => {
   return res.json();
 };
 
-export const createAnalyzePayload = ({ text, model }) => ({
-  model: model || DEFAULT_MODEL,
+export const createAnalyzePayload = ({ text }) => ({
+  prompt: { id: PROMPT_ID, version: PROMPT_VERSION },
   temperature: 0.4,
   text: { format: buildResponseFormat() },
   input: [
-    { role: "system", content: buildSystemPrompt() },
-    { role: "user", content: `TOR:\n${text}\n\nReturn BOM with estimated monthly pricing.` },
+    ...(isNationalScaleRequest(text)
+      ? [{ role: "user", content: NATIONAL_POLICY_HINT }]
+      : []),
+    {
+      role: "user",
+      content: `TOR:\n${text}\n\nReturn BOM with estimated monthly pricing.`,
+    },
   ],
 });
 
-export const createChatPayload = ({ messages = [], bom = null, model }) => ({
-  model: model || DEFAULT_MODEL,
-  temperature: 0.6,
-  text: { format: buildResponseFormat() },
-  input: [
-    {
-      role: "system",
-      content: `${buildSystemPrompt()} Current BOM context: ${JSON.stringify(bom || {})}`,
-    },
-    ...messages,
-  ],
-});
+export const createChatPayload = ({ messages = [], bom = null }) => {
+  const contextText = messages
+    .filter((msg) => msg?.role === "user")
+    .map((msg) => String(msg?.content || ""))
+    .join("\n");
+  const latestUserMessage = getLastUserMessageText(messages);
+  const isSmallTalk = shouldLockBomForChat(messages, bom) && !isNationalScaleRequest(latestUserMessage);
+
+  return {
+    prompt: { id: PROMPT_ID, version: PROMPT_VERSION },
+    temperature: 0.6,
+    text: { format: buildResponseFormat() },
+    input: [
+      ...(isSmallTalk
+        ? [{ role: "user", content: SMALLTALK_POLICY_HINT }]
+        : []),
+      ...(isNationalScaleRequest(contextText)
+        ? [{ role: "user", content: NATIONAL_POLICY_HINT }]
+        : []),
+      {
+        role: "user",
+        content: `Current BOM context: ${JSON.stringify(bom || {})}`,
+      },
+      ...messages,
+    ],
+  };
+};

@@ -1,11 +1,20 @@
 import http from "http";
 import dotenv from "dotenv";
+import {
+  applySizingPolicy,
+  collectUserMessagesText,
+  isNationalScaleRequest,
+  shouldLockBomForChat,
+} from "./api/_capacityPolicy.js";
 
 dotenv.config();
 
 const PORT = process.env.PORT || 3001;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
+const PROMPT_ID =
+  process.env.OPENAI_PROMPT_ID || "pmpt_6964c225bd488193a15045e75d0e25680790c8d1f4a7f51a";
+const PROMPT_VERSION = process.env.OPENAI_PROMPT_VERSION || "7";
 
 const jsonResponse = (res, status, payload) => {
   const body = JSON.stringify(payload);
@@ -73,6 +82,8 @@ const buildSystemPrompt = () =>
     "Rules:",
     "- summary must be 2-4 sentences, starting politely, and act like customer service.",
     "- summary must briefly restate the key requirements from TOR (2-4 key points).",
+    "- If user does not specify region, default region assumptions are: AWS=Asia Pacific (Thailand), Huawei Cloud=Thailand (Bangkok), Azure=Southeast Asia (Singapore).",
+    "- If user explicitly specifies a region, that user region overrides all defaults.",
     "- summary must mention cheapest provider with reason, key assumptions (FX=33, 730 hrs),",
     "  and offer at least 1 recommendation + 1 follow-up question.",
     "- Always provide BOM items for ALL 3 providers (aws/azure/huawei).",
@@ -93,17 +104,14 @@ const buildSchema = () => ({
       properties: {
         aws: {
           type: "array",
-          minItems: 1,
           items: { $ref: "#/definitions/item" },
         },
         azure: {
           type: "array",
-          minItems: 1,
           items: { $ref: "#/definitions/item" },
         },
         huawei: {
           type: "array",
-          minItems: 1,
           items: { $ref: "#/definitions/item" },
         },
       },
@@ -143,6 +151,11 @@ const buildResponseFormat = () => ({
   schema: buildSchema(),
   strict: true,
 });
+
+const NATIONAL_POLICY_HINT =
+  "Sizing policy: if requirement indicates nationwide Thailand usage, use NATIONAL baseline. Must include Multi-AZ/HA, Auto Scaling, DB Active/Standby + Read Replica, WAF, CDN, monitoring and non-trivial capacity.";
+const SMALLTALK_POLICY_HINT =
+  "If the latest user message is small talk or general conversation, reply naturally in Thai and do not modify BOM from Current BOM context.";
 
 const callOpenAI = async (payload) => {
   if (!OPENAI_API_KEY) {
@@ -200,23 +213,22 @@ const safeParseJson = (text) => {
 
 const handleAnalyze = async (req, res) => {
   const body = await parseBody(req);
-  const { text, model } = body;
+  const { text } = body;
 
   if (!text) {
     return jsonResponse(res, 400, { error: "Missing 'text'" });
   }
 
   const payload = {
-    model: model || DEFAULT_MODEL,
+    prompt: { id: PROMPT_ID, version: PROMPT_VERSION },
     temperature: 0.4,
     text: {
       format: buildResponseFormat(),
     },
     input: [
-      {
-        role: "system",
-        content: buildSystemPrompt(),
-      },
+      ...(isNationalScaleRequest(text)
+        ? [{ role: "user", content: NATIONAL_POLICY_HINT }]
+        : []),
       {
         role: "user",
         content: `TOR:\n${text}\n\nReturn BOM with estimated monthly pricing.`,
@@ -228,28 +240,42 @@ const handleAnalyze = async (req, res) => {
   const outputText = extractOutput(data);
   const parsed =
     safeParseJson(outputText) || { summary: "Response parsing failed.", bom: null };
+  const adjusted =
+    parsed?.bom && typeof parsed.bom === "object"
+      ? applySizingPolicy({
+          bom: parsed.bom,
+          summary: parsed.summary || "Analysis complete.",
+          contextText: text,
+        })
+      : { bom: parsed.bom || null, summary: parsed.summary || "Analysis complete." };
 
   return jsonResponse(res, 200, {
-    summary: parsed.summary || "Analysis complete.",
-    bom: parsed.bom || null,
+    summary: adjusted.summary,
+    bom: adjusted.bom,
     raw: parsed.bom ? null : outputText,
   });
 };
 
 const handleChat = async (req, res) => {
   const body = await parseBody(req);
-  const { messages = [], bom = null, model } = body;
+  const { messages = [], bom = null } = body;
+  const chatContext = collectUserMessagesText(messages);
+  const isSmallTalk = shouldLockBomForChat(messages, bom);
 
   const payload = {
-    model: model || DEFAULT_MODEL,
+    prompt: { id: PROMPT_ID, version: PROMPT_VERSION },
     temperature: 0.6,
     text: {
       format: buildResponseFormat(),
     },
     input: [
+      ...(isSmallTalk ? [{ role: "user", content: SMALLTALK_POLICY_HINT }] : []),
+      ...(isNationalScaleRequest(chatContext)
+        ? [{ role: "user", content: NATIONAL_POLICY_HINT }]
+        : []),
       {
-        role: "system",
-        content: `${buildSystemPrompt()} Current BOM context: ${JSON.stringify(
+        role: "user",
+        content: `Current BOM context: ${JSON.stringify(
           bom || {}
         )}`,
       },
@@ -270,9 +296,19 @@ const handleChat = async (req, res) => {
     });
   }
 
+  const initialMessage = parsed.summary || parsed.message || "Analysis complete.";
+  const adjusted =
+    parsed?.bom && typeof parsed.bom === "object"
+      ? applySizingPolicy({
+          bom: parsed.bom,
+          summary: initialMessage,
+          contextText: chatContext,
+        })
+      : { bom: parsed.bom || null, summary: initialMessage };
+
   return jsonResponse(res, 200, {
-    message: parsed.summary || parsed.message || "Analysis complete.",
-    bom: parsed.bom || null,
+    message: adjusted.summary,
+    bom: isSmallTalk ? bom || null : adjusted.bom,
     raw: null,
   });
 };

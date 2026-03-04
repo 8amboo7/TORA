@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import Tesseract from "tesseract.js";
 import JSZip from "jszip";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
-import toraLogo from "./assets/tora-logo.png";
+import toraLogo from "./assets/tora-logo-Cag_-YQf.png";
+import huaweiLogo from "./assets/huawei-logo.jpg";
 
 let mermaidLoader = null;
 
@@ -45,12 +46,28 @@ const getProviderLabel = (provider) => {
   return "Cloud";
 };
 
+const getDefaultRegionLabel = (provider) => {
+  if (provider === "aws") return "Asia Pacific (Thailand)";
+  if (provider === "huawei") return "Thailand (Bangkok)";
+  return "Southeast Asia (Singapore)";
+};
+
 const sanitizeMermaidText = (value) =>
   String(value || "")
     .replace(/"/g, "'")
+    .replace(/[|[\]{}<>`#;]/g, " ")
     .replace(/\r?\n/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+const sanitizeFileNameSegment = (value) => {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/[^a-z0-9-_]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+  return cleaned || "diagram";
+};
 
 const truncateText = (value, limit = 64) => {
   const text = sanitizeMermaidText(value);
@@ -66,29 +83,38 @@ const toNodeLabel = (item) => {
   const parts = [service];
   if (spec) parts.push(spec.slice(0, 70));
   if (qty) parts.push(`Qty ${qty}${unit ? ` ${unit}` : ""}`);
-  return parts.join(" | ");
+  return parts.join(" - ");
 };
 
 const buildCloudArchitectureMermaid = (provider, items = []) => {
   if (!items.length) return "";
 
   const providerLabel = getProviderLabel(provider);
+  const regionLabel = getDefaultRegionLabel(provider);
   const nextId = (() => {
     let i = 1;
     return (prefix) => `${prefix}${i++}`;
   })();
   const createNode = (prefix, label) => ({
     id: nextId(prefix),
-    label: truncateText(label, 72),
+    label: truncateText(label, 74),
   });
   const includesAny = (text, words) =>
     words.some((word) => text.includes(word));
+  const clampGroup = (group, limit, prefix, overflowLabel, layer) => {
+    if (group.length <= limit) return;
+    group.splice(limit, group.length - limit);
+    group.push(createNode(prefix, overflowLabel, layer));
+  };
 
+  const internetNodes = [];
   const edgeNodes = [];
-  const publicSubnet = [];
-  const appSubnet = [];
-  const dataSubnet = [];
-  const sharedServices = [];
+  const ingressNodes = [];
+  const appNodes = [];
+  const dataNodes = [];
+  const securityNodes = [];
+  const opsNodes = [];
+  const drNodes = [];
 
   for (const item of items) {
     const category = sanitizeMermaidText(item.category).toLowerCase();
@@ -97,146 +123,286 @@ const buildCloudArchitectureMermaid = (provider, items = []) => {
     const label = toNodeLabel(item);
 
     if (
-      category === "security" &&
-      includesAny(serviceText, ["waf", "ddos", "firewall", "anti", "shield"])
+      includesAny(serviceText, [
+        "cdn",
+        "cloudfront",
+        "front door",
+        "content delivery",
+      ])
     ) {
+      internetNodes.push(createNode("cdn", label));
+      continue;
+    }
+    if (includesAny(serviceText, ["waf", "ddos", "firewall", "shield"])) {
       edgeNodes.push(createNode("edge", label));
       continue;
     }
-
     if (
-      category === "network" &&
       includesAny(serviceText, [
         "load balancer",
-        "elb",
+        "application gateway",
         "alb",
+        "elb",
         "nat",
+        "ingress",
+        "api gateway",
         "gateway",
-        "eip",
       ])
     ) {
-      publicSubnet.push(createNode("pub", label));
+      ingressNodes.push(createNode("ing", label));
       continue;
     }
-
-    if (category === "compute") {
-      appSubnet.push(createNode("app", label));
-      continue;
-    }
-
-    if (category === "database" || category === "storage") {
-      dataSubnet.push(createNode("data", label));
-      continue;
-    }
-
     if (
-      category === "security" ||
-      category === "management" ||
-      category === "support" ||
-      category === "one-time" ||
-      category === "network"
+      includesAny(serviceText, [
+        "active/standby",
+        "active-standby",
+        "standby",
+        "read replica",
+        "disaster recovery",
+        "dr site",
+      ])
     ) {
-      sharedServices.push(createNode("svc", label));
+      drNodes.push(createNode("dr", label));
       continue;
     }
-
-    appSubnet.push(createNode("app", label));
+    if (
+      includesAny(serviceText, [
+        "monitor",
+        "logging",
+        "cloudwatch",
+        "cloud eye",
+        "audit",
+        "trace",
+        "observability",
+      ])
+    ) {
+      opsNodes.push(createNode("ops", label));
+      continue;
+    }
+    if (category === "security") {
+      securityNodes.push(createNode("sec", label));
+      continue;
+    }
+    if (
+      category === "database" ||
+      category === "storage" ||
+      includesAny(serviceText, [
+        "database",
+        "mysql",
+        "postgres",
+        "redis",
+        "cache",
+        "queue",
+        "kafka",
+        "storage",
+      ])
+    ) {
+      dataNodes.push(createNode("data", label));
+      continue;
+    }
+    if (category === "network") {
+      ingressNodes.push(createNode("ing", label));
+      continue;
+    }
+    if (category === "management" || category === "support") {
+      opsNodes.push(createNode("ops", label));
+      continue;
+    }
+    appNodes.push(createNode("app", label));
   }
 
+  if (!internetNodes.length)
+    internetNodes.push(createNode("cdn", "CDN / Acceleration"));
   if (!edgeNodes.length)
-    edgeNodes.push(createNode("edge", "WAF / Edge Protection (planned)"));
-  if (!publicSubnet.length)
-    publicSubnet.push(createNode("pub", "Load Balancer / Gateway (planned)"));
+    edgeNodes.push(createNode("edge", "WAF / DDoS Protection"));
+  if (!ingressNodes.length)
+    ingressNodes.push(createNode("ing", "Load Balancer / Ingress"));
+  if (!appNodes.length)
+    appNodes.push(createNode("app", "Application Service Cluster"));
+  if (!dataNodes.length)
+    dataNodes.push(createNode("data", "Primary Database (HA)"));
+  if (!securityNodes.length)
+    securityNodes.push(createNode("sec", "IAM / KMS / Secrets"));
+  if (!opsNodes.length)
+    opsNodes.push(createNode("ops", "Monitoring & Logging"));
+  if (!drNodes.length) drNodes.push(createNode("dr", "Standby / DR Replica"));
 
-  if (appSubnet.length > 4) {
-    appSubnet.splice(4, appSubnet.length - 4);
-    appSubnet.push(createNode("app", "Additional application nodes"));
-  }
-  if (dataSubnet.length > 4) {
-    dataSubnet.splice(4, dataSubnet.length - 4);
-    dataSubnet.push(createNode("data", "Additional data services"));
-  }
-  if (sharedServices.length > 4) {
-    sharedServices.splice(4, sharedServices.length - 4);
-    sharedServices.push(createNode("svc", "Additional shared services"));
-  }
+  clampGroup(internetNodes, 3, "cdn", "Additional internet services");
+  clampGroup(edgeNodes, 4, "edge", "Additional edge controls");
+  clampGroup(ingressNodes, 4, "ing", "Additional ingress components");
+  clampGroup(appNodes, 5, "app", "Additional application nodes");
+  clampGroup(dataNodes, 5, "data", "Additional data services");
+  clampGroup(securityNodes, 4, "sec", "Additional security controls");
+  clampGroup(opsNodes, 4, "ops", "Additional operation services");
+  clampGroup(drNodes, 3, "dr", "Additional DR components");
 
   const lines = [
-    "flowchart TB",
-    `  title["${providerLabel} Architecture (from current BOM)"]`,
-    `  user["End Users"] --> dns["DNS / Domain"]`,
-    `  dns --> edgeEntry["Edge Entry"]`,
-    '  subgraph vpc["VPC / Virtual Network"]',
-    '    subgraph public_zone["Public Subnet"]',
+    "flowchart LR",
+    `  title["${providerLabel} Reference Architecture - ${regionLabel}"]`,
+    '  users["Citizens / Nationwide Users"]',
+    '  context_note["Auto-generated from current BOM"]',
+    "  users --> context_note",
+    '  subgraph internet_zone["Internet & Delivery"]',
+    '    dns["DNS / Domain"]',
   ];
 
-  publicSubnet.forEach((node) =>
-    lines.push(`      ${node.id}["${node.label}"]`),
+  internetNodes.forEach((node) =>
+    lines.push(`    ${node.id}["${node.label}"]`),
   );
-  lines.push("    end");
-  lines.push('    subgraph app_zone["Application Subnet"]');
-  appSubnet.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
-  lines.push("    end");
-  lines.push('    subgraph data_zone["Data Subnet"]');
-  dataSubnet.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
-  lines.push("    end");
-  lines.push('    subgraph shared_zone["Shared Services"]');
-  sharedServices.forEach((node) =>
-    lines.push(`      ${node.id}["${node.label}"]`),
-  );
-  lines.push("    end");
   lines.push("  end");
-  lines.push('  subgraph edge_zone["Edge Security"]');
-  edgeNodes.forEach((node) => lines.push(`    ${node.id}["${node.label}"]`));
+  lines.push(`  subgraph core_zone["${providerLabel} Core Services"]`);
+  lines.push('    subgraph edge_zone["Edge Security"]');
+  edgeNodes.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
+  lines.push("    end");
+  lines.push('    subgraph ingress_zone["Access & Ingress"]');
+  ingressNodes.forEach((node) =>
+    lines.push(`      ${node.id}["${node.label}"]`),
+  );
+  lines.push("    end");
+  lines.push('    subgraph app_zone["Application Tier (Auto Scaling)"]');
+  appNodes.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
+  lines.push("    end");
+  lines.push('    subgraph data_zone["Data Tier"]');
+  dataNodes.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
+  lines.push("    end");
+  lines.push('    subgraph security_zone["Security Controls"]');
+  securityNodes.forEach((node) =>
+    lines.push(`      ${node.id}["${node.label}"]`),
+  );
+  lines.push("    end");
+  lines.push('    subgraph ops_zone["Operations & Observability"]');
+  opsNodes.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
+  lines.push("    end");
+  lines.push('    subgraph dr_zone["Resilience / DR"]');
+  drNodes.forEach((node) => lines.push(`      ${node.id}["${node.label}"]`));
+  lines.push("    end");
   lines.push("  end");
 
-  lines.push(`  edgeEntry --> ${edgeNodes[0].id}`);
+  lines.push("  users --> dns");
+  lines.push(`  dns --> ${internetNodes[0].id}`);
+
+  for (let i = 0; i < internetNodes.length - 1; i += 1) {
+    lines.push(`  ${internetNodes[i].id} --> ${internetNodes[i + 1].id}`);
+  }
+  const internetExit = internetNodes[internetNodes.length - 1].id;
+  lines.push(`  ${internetExit} --> ${edgeNodes[0].id}`);
+
   for (let i = 0; i < edgeNodes.length - 1; i += 1) {
     lines.push(`  ${edgeNodes[i].id} --> ${edgeNodes[i + 1].id}`);
   }
   lines.push(
-    `  ${edgeNodes[edgeNodes.length - 1].id} --> ${publicSubnet[0].id}`,
+    `  ${edgeNodes[edgeNodes.length - 1].id} --> ${ingressNodes[0].id}`,
   );
 
-  for (let i = 0; i < publicSubnet.length - 1; i += 1) {
-    lines.push(`  ${publicSubnet[i].id} --> ${publicSubnet[i + 1].id}`);
+  for (let i = 0; i < ingressNodes.length - 1; i += 1) {
+    lines.push(`  ${ingressNodes[i].id} --> ${ingressNodes[i + 1].id}`);
   }
+  const ingressExit = ingressNodes[ingressNodes.length - 1].id;
+  appNodes.forEach((node) => lines.push(`  ${ingressExit} --> ${node.id}`));
 
-  const publicExit = publicSubnet[publicSubnet.length - 1].id;
-  appSubnet.forEach((node) => lines.push(`  ${publicExit} --> ${node.id}`));
-
-  if (dataSubnet.length) {
-    appSubnet.forEach((appNode) => {
-      dataSubnet.forEach((dataNode) => {
-        lines.push(`  ${appNode.id} --> ${dataNode.id}`);
-      });
-    });
+  const primaryData = dataNodes[0].id;
+  appNodes.forEach((appNode) =>
+    lines.push(`  ${appNode.id} --> ${primaryData}`),
+  );
+  for (let i = 1; i < dataNodes.length; i += 1) {
+    lines.push(`  ${primaryData} --> ${dataNodes[i].id}`);
   }
+  drNodes.forEach((drNode) => lines.push(`  ${primaryData} -.-> ${drNode.id}`));
 
-  if (sharedServices.length) {
-    const observed = [...appSubnet, ...dataSubnet];
-    if (observed.length) {
-      sharedServices.forEach((svcNode) => {
-        observed.forEach((node) => {
-          lines.push(`  ${svcNode.id} -.monitor/manage.-> ${node.id}`);
-        });
-      });
-    } else {
-      lines.push(`  ${publicExit} --> ${sharedServices[0].id}`);
-    }
-  }
+  securityNodes.forEach((secNode) => {
+    lines.push(`  ${secNode.id} -.-> ${ingressExit}`);
+    appNodes.forEach((appNode) =>
+      lines.push(`  ${secNode.id} -.-> ${appNode.id}`),
+    );
+    lines.push(`  ${secNode.id} -.-> ${primaryData}`);
+  });
 
+  opsNodes.forEach((opsNode) => {
+    lines.push(`  ${opsNode.id} -.-> ${ingressExit}`);
+    appNodes.forEach((appNode) =>
+      lines.push(`  ${opsNode.id} -.-> ${appNode.id}`),
+    );
+    lines.push(`  ${opsNode.id} -.-> ${primaryData}`);
+  });
+
+  const classGroups = {
+    internet: internetNodes.map((n) => n.id),
+    edge: edgeNodes.map((n) => n.id),
+    ingress: ingressNodes.map((n) => n.id),
+    app: appNodes.map((n) => n.id),
+    data: dataNodes.map((n) => n.id),
+    security: securityNodes.map((n) => n.id),
+    ops: opsNodes.map((n) => n.id),
+    dr: drNodes.map((n) => n.id),
+  };
   lines.push(
     "  classDef zone fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px,color:#0f172a;",
-    "  classDef core fill:#ffffff,stroke:#94a3b8,stroke-width:1px,color:#0f172a;",
-    "  class vpc,public_zone,app_zone,data_zone,shared_zone,edge_zone zone;",
+    "  classDef internet fill:#dbeafe,stroke:#1d4ed8,stroke-width:1.2px,color:#1e3a8a;",
+    "  classDef edge fill:#fee2e2,stroke:#dc2626,stroke-width:1.2px,color:#7f1d1d;",
+    "  classDef ingress fill:#ffedd5,stroke:#ea580c,stroke-width:1.2px,color:#7c2d12;",
+    "  classDef app fill:#dcfce7,stroke:#16a34a,stroke-width:1.2px,color:#14532d;",
+    "  classDef data fill:#ede9fe,stroke:#7c3aed,stroke-width:1.2px,color:#4c1d95;",
+    "  classDef security fill:#fef9c3,stroke:#ca8a04,stroke-width:1.2px,color:#713f12;",
+    "  classDef ops fill:#e0f2fe,stroke:#0284c7,stroke-width:1.2px,color:#0c4a6e;",
+    "  classDef dr fill:#fce7f3,stroke:#db2777,stroke-width:1.2px,color:#831843;",
   );
+  Object.entries(classGroups).forEach(([name, ids]) => {
+    if (ids.length) lines.push(`  class ${ids.join(",")} ${name};`);
+  });
 
   return lines.join("\n");
 };
 
-const MermaidDiagram = ({ chart }) => {
+const DEFAULT_DIAGRAM_ZOOM = 0.4;
+const MIN_DIAGRAM_ZOOM = 0.1;
+const MAX_DIAGRAM_ZOOM = 1;
+const ZOOM_STEP = 0.4;
+const roundZoom = (value) => Math.round(value * 100) / 100;
+const clampZoom = (value) =>
+  Math.min(MAX_DIAGRAM_ZOOM, Math.max(MIN_DIAGRAM_ZOOM, roundZoom(value)));
+const extractSvgDimensions = (svgText) => {
+  const fallback = { width: 1400, height: 800 };
+  if (!svgText) return fallback;
+
+  const viewBoxMatch = svgText.match(/viewBox="([^"]+)"/i);
+  if (viewBoxMatch?.[1]) {
+    const values = viewBoxMatch[1]
+      .trim()
+      .split(/\s+/)
+      .map((item) => Number(item));
+    if (
+      values.length === 4 &&
+      values.every((item) => Number.isFinite(item)) &&
+      values[2] > 0 &&
+      values[3] > 0
+    ) {
+      return { width: values[2], height: values[3] };
+    }
+  }
+
+  const widthMatch = svgText.match(/width="([\d.]+)(?:px)?"/i);
+  const heightMatch = svgText.match(/height="([\d.]+)(?:px)?"/i);
+  const width = Number(widthMatch?.[1]);
+  const height = Number(heightMatch?.[1]);
+  if (width > 0 && height > 0) return { width, height };
+  return fallback;
+};
+
+const MermaidDiagram = memo(({ chart, exportFileName = "diagram" }) => {
   const [svg, setSvg] = useState("");
+  const [zoom, setZoom] = useState(DEFAULT_DIAGRAM_ZOOM);
+  const viewportRef = useRef(null);
+  const zoomRef = useRef(DEFAULT_DIAGRAM_ZOOM);
+  const svgDimensions = useMemo(() => extractSvgDimensions(svg), [svg]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    setZoom(DEFAULT_DIAGRAM_ZOOM);
+    zoomRef.current = DEFAULT_DIAGRAM_ZOOM;
+  }, [chart]);
 
   useEffect(() => {
     let isActive = true;
@@ -256,7 +422,15 @@ const MermaidDiagram = ({ chart }) => {
         });
         const id = `mermaid-${Math.random().toString(36).slice(2)}`;
         const { svg: output } = await mermaid.render(id, chart);
-        if (isActive) setSvg(output);
+        if (!isActive) return;
+        if (
+          typeof output === "string" &&
+          /syntax error in text|mermaid version/i.test(output)
+        ) {
+          setSvg("");
+          return;
+        }
+        setSvg(output);
       } catch {
         if (isActive) setSvg("");
       }
@@ -268,7 +442,63 @@ const MermaidDiagram = ({ chart }) => {
     };
   }, [chart]);
 
+  useEffect(() => {
+    const node = viewportRef.current;
+    if (!node) return undefined;
+
+    let gestureBaseZoom = zoomRef.current;
+    const onGestureStart = (event) => {
+      event.preventDefault();
+      gestureBaseZoom = zoomRef.current;
+    };
+    const onGestureChange = (event) => {
+      event.preventDefault();
+      const pinchScale = Number(event.scale) || 1;
+      setZoom(clampZoom(gestureBaseZoom * pinchScale));
+    };
+    const onGestureEnd = (event) => {
+      event.preventDefault();
+      gestureBaseZoom = zoomRef.current;
+    };
+
+    node.addEventListener("gesturestart", onGestureStart, { passive: false });
+    node.addEventListener("gesturechange", onGestureChange, { passive: false });
+    node.addEventListener("gestureend", onGestureEnd, { passive: false });
+
+    return () => {
+      node.removeEventListener("gesturestart", onGestureStart);
+      node.removeEventListener("gesturechange", onGestureChange);
+      node.removeEventListener("gestureend", onGestureEnd);
+    };
+  }, []);
+
   if (!chart) return null;
+
+  const handleWheelZoom = (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const direction = event.deltaY < 0 ? 1 : -1;
+    const dynamicStep = Math.min(
+      1.2,
+      Math.max(ZOOM_STEP, Math.abs(event.deltaY) * 0.004),
+    );
+    setZoom((prev) => clampZoom(prev + direction * dynamicStep));
+  };
+
+  const handleExportDiagram = () => {
+    if (!svg) return;
+    const blob = new Blob([svg], {
+      type: "image/svg+xml;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${sanitizeFileNameSegment(exportFileName)}.svg`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
 
   if (!svg) {
     return (
@@ -278,13 +508,78 @@ const MermaidDiagram = ({ chart }) => {
     );
   }
 
+  const baseWidth = svgDimensions.width;
+  const baseHeight = svgDimensions.height;
+  const scaledWidth = 20;
+  const scaledHeight = Math.max(1, roundZoom(baseHeight * zoom));
+
   return (
-    <div
-      className="mt-3 p-3 bg-gray-50 border border-gray-200 rounded overflow-auto"
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
+    <div className="mt-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <span className="text-[11px] text-gray-500 uppercase tracking-wide">
+          Diagram Controls (Use Buttons or Trackpad Pinch)
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportDiagram}
+            className="h-9 px-2 rounded border border-gray-200 text-gray-700 hover:bg-gray-50 text-[11px] font-medium inline-flex items-center gap-1"
+            title="Export diagram as SVG"
+          >
+            <i className="fas fa-file-export"></i>
+            Export Diagram
+          </button>
+          <div className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-white p-1 shadow-sm">
+            <button
+              type="button"
+              onClick={() => setZoom((prev) => clampZoom(prev - ZOOM_STEP))}
+              className="h-7 w-7 rounded border border-gray-200 text-gray-600 hover:bg-gray-50"
+              title="Zoom out"
+            >
+              -
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoom(DEFAULT_DIAGRAM_ZOOM)}
+              className="h-7 px-2 rounded border border-gray-200 text-gray-600 hover:bg-gray-50 text-xs font-medium"
+              title="Reset zoom"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoom((prev) => clampZoom(prev + ZOOM_STEP))}
+              className="h-7 w-7 rounded border border-gray-200 text-gray-600 hover:bg-gray-50"
+              title="Zoom in"
+            >
+              +
+            </button>
+          </div>
+        </div>
+      </div>
+      <div
+        ref={viewportRef}
+        onWheel={handleWheelZoom}
+        className="p-2 bg-gray-50 border border-gray-200 rounded overflow-auto h-[240px] md:h-[260px] touch-none overscroll-contain"
+      >
+        <div
+          className="relative"
+          style={{ width: `${scaledWidth}px`, height: `${scaledHeight}px` }}
+        >
+          <div
+            className="mermaid-diagram-inner origin-top-left transition-transform duration-150 ease-out"
+            style={{
+              width: `${baseWidth}px`,
+              height: `${baseHeight}px`,
+              transform: `scale(${zoom})`,
+            }}
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        </div>
+      </div>
+    </div>
   );
-};
+});
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -296,6 +591,7 @@ const initialBomData = {
   azure: [],
   huawei: [],
 };
+const BOM_PROVIDERS = ["aws", "azure", "huawei"];
 const MODEL_ID = "ft:gpt-4o-2024-08-06:bamboofernfoo:final:CUH4BvSo";
 const GENERIC_API_ERROR =
   "ระบบ API ตอบกลับไม่ถูกต้อง กรุณาตรวจสอบการตั้งค่า Vercel Functions และลองใหม่อีกครั้ง";
@@ -332,6 +628,21 @@ const formatBaht = (value) =>
     maximumFractionDigits: 2,
   })} `;
 
+const createBomFingerprint = (bom) =>
+  JSON.stringify(
+    BOM_PROVIDERS.map((provider) =>
+      (Array.isArray(bom?.[provider]) ? bom[provider] : []).map((item) => ({
+        category: item?.category || "",
+        service: item?.service || "",
+        spec: item?.spec || "",
+        unit: item?.unit || "",
+        qty: Number(item?.qty || 0),
+        price: Number(item?.price || 0),
+        total: Number(item?.total || 0),
+      })),
+    ),
+  );
+
 export default function App() {
   const [currentView, setCurrentView] = useState("dashboard");
   const [activeTab, setActiveTab] = useState("aws");
@@ -349,8 +660,20 @@ export default function App() {
   const [isChatTyping, setIsChatTyping] = useState(false);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatHistory, isChatWaiting, isChatTyping]);
+    chatEndRef.current?.scrollIntoView({
+      behavior: isChatWaiting || isChatTyping ? "auto" : "smooth",
+    });
+  }, [chatHistory.length, isChatWaiting, isChatTyping]);
+
+  useEffect(
+    () => () => {
+      if (typingTimerRef.current) {
+        clearTimeout(typingTimerRef.current);
+        typingTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -611,7 +934,7 @@ export default function App() {
         {
           role: "assistant",
           content:
-            "Hello! Interactive Mode is ready. Tell me your requirements and I will refine the BOM.",
+            "สวัสดีค่ะ พร้อมช่วยจัดทำ BOM แล้วค่ะ รบกวนเริ่มจากแจ้งสเปกหลักก่อน เช่น จำนวนเครื่อง CPU/RAM พื้นที่จัดเก็บ ระบบปฏิบัติการ และ Region ที่ต้องการนะคะ",
         },
       ]);
       setTextareaKey((prev) => prev + 1);
@@ -622,6 +945,11 @@ export default function App() {
   const handleSendMessage = async () => {
     const currentValue = textareaRef.current?.value || "";
     if (!currentValue.trim()) return;
+
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = null;
+    }
 
     const userMsg = currentValue;
     setTextareaKey((prev) => prev + 1);
@@ -651,9 +979,10 @@ export default function App() {
         !res.ok && !serverError && !serverDetails
           ? formatApiFailure(res, raw)
           : null;
-      const nextBom = data?.bom || bomData;
       if (data?.bom) {
-        setBomData(data.bom);
+        if (createBomFingerprint(data.bom) !== createBomFingerprint(bomData)) {
+          setBomData(data.bom);
+        }
       }
 
       const replyText =
@@ -665,10 +994,6 @@ export default function App() {
         "Noted. I can adjust compute sizing, storage, or redundancy levels if you want a different cost profile.";
       setIsChatWaiting(false);
       setIsChatTyping(true);
-      if (typingTimerRef.current) {
-        clearTimeout(typingTimerRef.current);
-        typingTimerRef.current = null;
-      }
 
       let targetIndex = null;
       setChatHistory((prev) => {
@@ -677,8 +1002,9 @@ export default function App() {
       });
 
       let charIndex = 0;
-      const step = () => {
-        charIndex += 2;
+      const stepSize = Math.max(1, Math.ceil(replyText.length / 180));
+      const typeStep = () => {
+        charIndex = Math.min(replyText.length, charIndex + stepSize);
         const nextText = replyText.slice(0, charIndex);
         setChatHistory((prev) => {
           if (targetIndex === null || targetIndex >= prev.length) return prev;
@@ -687,13 +1013,14 @@ export default function App() {
           return next;
         });
         if (charIndex < replyText.length) {
-          typingTimerRef.current = setTimeout(step, 18);
-        } else {
-          typingTimerRef.current = null;
-          setIsChatTyping(false);
+          typingTimerRef.current = setTimeout(typeStep, 18);
+          return;
         }
+        typingTimerRef.current = null;
+        setIsChatTyping(false);
       };
-      step();
+
+      typeStep();
     } catch (error) {
       if (typingTimerRef.current) {
         clearTimeout(typingTimerRef.current);
@@ -748,6 +1075,7 @@ export default function App() {
     setIsChatWaiting(false);
     setIsChatTyping(false);
     setChatHistory([]);
+    setBomData(initialBomData);
     setTextareaKey((prev) => prev + 1);
   };
 
@@ -757,7 +1085,11 @@ export default function App() {
         className="flex items-center gap-3 cursor-pointer"
         onClick={() => setCurrentView("dashboard")}
       >
-        <img src={toraLogo} alt="TORA logo" className="w-9 h-9 rounded-lg object-cover shadow-md" />
+        <img
+          src={toraLogo}
+          alt="TORA logo"
+          className="w-9 h-9 rounded-lg object-cover shadow-md"
+        />
         <div className="flex flex-col">
           <h1 className="font-bold text-lg tracking-tight text-gray-900 leading-none">
             TORA
@@ -958,7 +1290,9 @@ export default function App() {
                       <li>- Increase app VMs to 4 instances.</li>
                       <li>- Change database disk to 2TB SSD.</li>
                       <li>- Add WAF and set backup retention to 30 days.</li>
-                      <li>- Provide the lowest-cost option under the same SLA.</li>
+                      <li>
+                        - Provide the lowest-cost option under the same SLA.
+                      </li>
                     </ul>
                   </div>
                   <div className="rounded-lg border border-amber-100 bg-amber-50 p-4">
@@ -966,7 +1300,9 @@ export default function App() {
                       Accuracy tips
                     </p>
                     <ul className="space-y-1 text-amber-900/90">
-                      <li>- Specify instance counts and runtime assumptions.</li>
+                      <li>
+                        - Specify instance counts and runtime assumptions.
+                      </li>
                       <li>- Keep region consistent across providers.</li>
                       <li>- Include compliance/security constraints.</li>
                       <li>- Clarify whether you need CapEx or OpEx framing.</li>
@@ -1318,7 +1654,11 @@ export default function App() {
       <footer className="bg-white border-t border-gray-200 py-12">
         <div className="max-w-6xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-6">
           <div className="flex items-center gap-3">
-            <img src={toraLogo} alt="TORA logo" className="w-8 h-8 rounded-lg object-cover" />
+            <img
+              src={toraLogo}
+              alt="TORA logo"
+              className="w-8 h-8 rounded-lg object-cover"
+            />
             <span className="font-bold text-[#0f172a] tracking-tight">
               TORA Platform
             </span>
@@ -1344,6 +1684,17 @@ export default function App() {
 
   const WorkspaceView = () => {
     const cheapest = getCheapestProvider();
+    const hasAnyBomData = ["aws", "azure", "huawei"].some(
+      (provider) => (bomData[provider] || []).length > 0,
+    );
+    const activeBomItems = bomData[activeTab] || [];
+    const architectureChart = useMemo(
+      () => buildCloudArchitectureMermaid(activeTab, activeBomItems),
+      [activeTab, activeBomItems],
+    );
+    const diagramExportFileName = `${activeTab}-architecture-${new Date()
+      .toISOString()
+      .slice(0, 10)}`;
 
     return (
       <div className="pt-16 h-screen flex flex-col bg-gray-50/50">
@@ -1358,7 +1709,12 @@ export default function App() {
             </button>
             <button
               onClick={handleExport}
-              className="px-4 py-2 text-sm bg-[#0f172a] hover:bg-[#1e293b] text-white rounded-md shadow-sm flex items-center gap-2 transition-all"
+              disabled={!hasAnyBomData}
+              className={`px-4 py-2 text-sm text-white rounded-md shadow-sm flex items-center gap-2 transition-all ${
+                hasAnyBomData
+                  ? "bg-[#0f172a] hover:bg-[#1e293b]"
+                  : "bg-gray-300 cursor-not-allowed"
+              }`}
             >
               <i className="fas fa-download"></i> Export BOM
             </button>
@@ -1470,8 +1826,7 @@ export default function App() {
                 {
                   id: "huawei",
                   label: "Huawei Cloud",
-                  icon: "fas fa-cloud",
-                  color: "text-[#C7000B]",
+                  logo: huaweiLogo,
                 },
               ].map((cloud) => (
                 <button
@@ -1483,7 +1838,15 @@ export default function App() {
                       : "border-transparent text-gray-500 hover:text-gray-700"
                   }`}
                 >
-                  <i className={`${cloud.icon} ${cloud.color}`}></i>{" "}
+                  {cloud.logo ? (
+                    <img
+                      src={cloud.logo}
+                      alt={`${cloud.label} logo`}
+                      className="w-4 h-4 object-contain"
+                    />
+                  ) : (
+                    <i className={`${cloud.icon} ${cloud.color}`}></i>
+                  )}{" "}
                   {cloud.label}
                   {cheapest === cloud.id && (
                     <span className="ml-1 bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded-full font-bold">
@@ -1495,125 +1858,144 @@ export default function App() {
             </div>
 
             <div className="flex-1 p-8 overflow-auto">
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
-                  <h3 className="font-semibold text-gray-800 text-sm">
-                    Bill of Materials (BOM)
+              {!hasAnyBomData ? (
+                <div className="bg-white rounded-lg border border-gray-200 p-8 shadow-sm">
+                  <h3 className="text-lg font-semibold text-gray-800 mb-2">
+                    ยังไม่มีตาราง BOM
                   </h3>
-                  <span className="text-xs text-gray-500">
-                    Region: Asia Pacific (Singapore)
-                  </span>
-                </div>
-                <table className="w-full text-sm text-left">
-                  <thead className="text-xs text-gray-500 uppercase bg-white border-b border-gray-100">
-                    <tr>
-                      <th className="px-6 py-3 font-semibold w-32">Category</th>
-                      <th className="px-6 py-3 font-semibold">Service Name</th>
-                      <th className="px-6 py-3 font-semibold">Specification</th>
-                      <th className="px-6 py-3 text-center font-semibold w-24">
-                        Qty
-                      </th>
-                      <th className="px-6 py-3 text-right font-semibold w-32">
-                        Unit Price
-                      </th>
-                      <th className="px-6 py-3 text-right font-semibold w-32">
-                        Total
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {bomData[activeTab]?.map((item) => (
-                      <tr
-                        key={item.id}
-                        className="hover:bg-gray-50 transition-colors"
-                      >
-                        <td className="px-6 py-4 font-medium text-gray-500">
-                          {item.category}
-                        </td>
-                        <td className="px-6 py-4 font-semibold text-gray-800">
-                          {item.service}
-                        </td>
-                        <td className="px-6 py-4 text-gray-600 font-mono text-xs">
-                          {item.spec}
-                        </td>
-                        <td className="px-6 py-4 text-center text-gray-800">
-                          {item.qty}
-                        </td>
-                        <td className="px-6 py-4 text-right text-gray-600">
-                          {formatBaht(item.price)}
-                        </td>
-                        <td className="px-6 py-4 text-right font-bold text-gray-900">
-                          {formatBaht(item.total)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot className="bg-gray-50 border-t border-gray-200">
-                    <tr>
-                      <td
-                        colSpan="5"
-                        className="px-6 py-4 text-right text-gray-600 font-medium"
-                      >
-                        Monthly Estimated Cost:
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <span
-                          className={`text-xl font-bold ${
-                            activeTab === cheapest
-                              ? "text-green-600"
-                              : "text-gray-900"
-                          }`}
-                        >
-                          ฿{formatBaht(getTotal(activeTab))} บาท
-                        </span>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td
-                        colSpan="5"
-                        className="px-6 py-4 text-right text-gray-600 font-medium"
-                      >
-                        Yearly Estimated Cost:
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <span className="text-lg font-semibold text-gray-900">
-                          ฿{formatBaht(getYearlyTotal(activeTab))}
-                        </span>
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-
-              <div className="mt-6 bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-                <div className="text-xs font-semibold text-gray-400 uppercase mb-2">
-                  Architecture Diagram
-                </div>
-                <MermaidDiagram
-                  chart={buildCloudArchitectureMermaid(
-                    activeTab,
-                    bomData[activeTab] || [],
-                  )}
-                />
-              </div>
-
-              <div className="mt-6 flex gap-4">
-                <div className="flex-1 bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-                  <div className="text-xs font-semibold text-gray-400 uppercase mb-2">
-                    Cost Optimization Insight
-                  </div>
                   <p className="text-sm text-gray-600 leading-relaxed">
-                    <i className="fas fa-lightbulb text-yellow-500 mr-2"></i>
-                    {!cheapest
-                      ? "ยังไม่มีข้อมูลราคาครบทุกเจ้า กรุณาระบุสเปกหรือจำนวนเพิ่มเติมเพื่อเปรียบเทียบต้นทุนได้แม่นยำขึ้น"
-                      : cheapest === "huawei"
-                        ? "Huawei Cloud offers the most competitive pricing for Compute instances in this region."
-                        : cheapest === "aws"
-                          ? "AWS provides the best value for Storage-heavy workloads."
-                          : "Azure Hybrid Benefit could further reduce costs if you have existing Windows licenses."}
+                    กรุณาระบุ requirement ก่อน เช่น จำนวนเครื่อง CPU/RAM
+                    พื้นที่จัดเก็บ ระบบปฏิบัติการ และ Region ที่ต้องการ
+                    แล้วระบบจะสร้าง BOM ให้อัตโนมัติ
                   </p>
                 </div>
-              </div>
+              ) : (
+                <>
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
+                      <h3 className="font-semibold text-gray-800 text-sm">
+                        Bill of Materials (BOM)
+                      </h3>
+                      <span className="text-xs text-gray-500">
+                        Region: {getDefaultRegionLabel(activeTab)}
+                      </span>
+                    </div>
+                    <table className="w-full text-sm text-left">
+                      <thead className="text-xs text-gray-500 uppercase bg-white border-b border-gray-100">
+                        <tr>
+                          <th className="px-6 py-3 font-semibold w-32">
+                            Category
+                          </th>
+                          <th className="px-6 py-3 font-semibold">
+                            Service Name
+                          </th>
+                          <th className="px-6 py-3 font-semibold">
+                            Specification
+                          </th>
+                          <th className="px-6 py-3 text-center font-semibold w-24">
+                            Qty
+                          </th>
+                          <th className="px-6 py-3 text-right font-semibold w-32">
+                            Unit Price
+                          </th>
+                          <th className="px-6 py-3 text-right font-semibold w-32">
+                            Total
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {bomData[activeTab]?.map((item) => (
+                          <tr
+                            key={item.id}
+                            className="hover:bg-gray-50 transition-colors"
+                          >
+                            <td className="px-6 py-4 font-medium text-gray-500">
+                              {item.category}
+                            </td>
+                            <td className="px-6 py-4 font-semibold text-gray-800">
+                              {item.service}
+                            </td>
+                            <td className="px-6 py-4 text-gray-600 font-mono text-xs">
+                              {item.spec}
+                            </td>
+                            <td className="px-6 py-4 text-center text-gray-800">
+                              {item.qty}
+                            </td>
+                            <td className="px-6 py-4 text-right text-gray-600">
+                              {formatBaht(item.price)}
+                            </td>
+                            <td className="px-6 py-4 text-right font-bold text-gray-900">
+                              {formatBaht(item.total)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="bg-gray-50 border-t border-gray-200">
+                        <tr>
+                          <td
+                            colSpan="5"
+                            className="px-6 py-4 text-right text-gray-600 font-medium"
+                          >
+                            Monthly Estimated Cost:
+                          </td>
+                          <td className="px-6 py-4 text-right">
+                            <span
+                              className={`text-xl font-bold ${
+                                activeTab === cheapest
+                                  ? "text-green-600"
+                                  : "text-gray-900"
+                              }`}
+                            >
+                              ฿{formatBaht(getTotal(activeTab))} บาท
+                            </span>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td
+                            colSpan="5"
+                            className="px-6 py-4 text-right text-gray-600 font-medium"
+                          >
+                            Yearly Estimated Cost:
+                          </td>
+                          <td className="px-6 py-4 text-right">
+                            <span className="text-lg font-semibold text-gray-900">
+                              ฿{formatBaht(getYearlyTotal(activeTab))}
+                            </span>
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+
+                  <div className="mt-6 bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+                    <div className="text-xs font-semibold text-gray-400 uppercase mb-2">
+                      Architecture Diagram
+                    </div>
+                    <MermaidDiagram
+                      chart={architectureChart}
+                      exportFileName={diagramExportFileName}
+                    />
+                  </div>
+
+                  <div className="mt-6 flex gap-4">
+                    <div className="flex-1 bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+                      <div className="text-xs font-semibold text-gray-400 uppercase mb-2">
+                        Cost Optimization Insight
+                      </div>
+                      <p className="text-sm text-gray-600 leading-relaxed">
+                        <i className="fas fa-lightbulb text-yellow-500 mr-2"></i>
+                        {!cheapest
+                          ? "ยังไม่มีข้อมูลราคาครบทุกเจ้า กรุณาระบุสเปกหรือจำนวนเพิ่มเติมเพื่อเปรียบเทียบต้นทุนได้แม่นยำขึ้น"
+                          : cheapest === "huawei"
+                            ? "Huawei Cloud offers the most competitive pricing for Compute instances in this region."
+                            : cheapest === "aws"
+                              ? "AWS provides the best value for Storage-heavy workloads."
+                              : "Azure Hybrid Benefit could further reduce costs if you have existing Windows licenses."}
+                      </p>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>

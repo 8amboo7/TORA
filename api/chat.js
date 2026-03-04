@@ -6,15 +6,21 @@ import {
   parseJsonBody,
   safeParseJson,
 } from "./_openai.js";
+import {
+  applySizingPolicy,
+  collectUserMessagesText,
+  shouldLockBomForChat,
+} from "./_capacityPolicy.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return jsonResponse(res, 405, { error: "Method not allowed" });
 
   try {
     const body = await parseJsonBody(req);
-    const { messages = [], bom = null, model } = body;
+    const { messages = [], bom = null } = body;
+    const isSmallTalk = shouldLockBomForChat(messages, bom);
 
-    const data = await callOpenAI(createChatPayload({ messages, bom, model }));
+    const data = await callOpenAI(createChatPayload({ messages, bom }));
     const outputText = extractOutput(data);
     const parsed = safeParseJson(outputText);
 
@@ -27,9 +33,19 @@ export default async function handler(req, res) {
       });
     }
 
+    const initialMessage = parsed.summary || parsed.message || "Analysis complete.";
+    const adjusted =
+      parsed?.bom && typeof parsed.bom === "object"
+        ? applySizingPolicy({
+            bom: parsed.bom,
+            summary: initialMessage,
+            contextText: collectUserMessagesText(messages),
+          })
+        : { bom: parsed.bom || null, summary: initialMessage };
+
     return jsonResponse(res, 200, {
-      message: parsed.summary || parsed.message || "Analysis complete.",
-      bom: parsed.bom || null,
+      message: adjusted.summary,
+      bom: isSmallTalk ? bom || null : adjusted.bom,
       raw: null,
     });
   } catch (err) {
