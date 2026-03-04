@@ -5,7 +5,7 @@ import JSZip from "jszip";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import toraLogo from "./assets/tora-logo-Cag_-YQf.png";
-import huaweiLogo from "./assets/huawei-logo.jpg";
+import huaweiLogo from "./assets/huawei-logo2.png";
 
 let mermaidLoader = null;
 

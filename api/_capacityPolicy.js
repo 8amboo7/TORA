@@ -4,7 +4,12 @@ const NATIONAL_INTENT_REGEX =
 const SMALLTALK_REGEX =
   /^(?:hi|hello|hey|yo|ok|okay|test|สวัสดี(?:ครับ|ค่ะ|คะ)?|หวัดดี(?:ครับ|ค่ะ|คะ)?|ฮัลโหล|ทำไรอยู่|ทำอะไรอยู่|สบายดี(?:ไหม|มั้ย)?|ขอบคุณ(?:ครับ|ค่ะ)?|ลองเฉยๆ|ทดสอบ)\s*[!.?,\u0E2F\u0E46\u0E5A\u0E5B]*$/i;
 const REQUIREMENT_SIGNAL_REGEX =
-  /(server|vm|instance|compute|cpu|ram|memory|storage|database|db|rds|mysql|postgres|network|vpc|cdn|waf|load balancer|autoscaling|active\/standby|read replica|user|concurrent|rps|traffic|web|mobile|api|erp|portal|cloud|เซิร์ฟเวอร์|สเปก|ซีพียู|แรม|หน่วยความจำ|ดิสก์|พื้นที่จัดเก็บ|ฐานข้อมูล|เครือข่าย|ผู้ใช้|ทราฟฟิก|โหลดบาลานเซอร์|แอป|เว็บ|สำรอง|active standby|replica|ทั้งประเทศ|ทั่วไทย|ระดับประเทศ)/i;
+  /(server|vm|instance|compute|cpu|ram|memory|storage|database|db|rds|mysql|postgres|network|vpc|cdn|waf|load balancer|autoscaling|active\/standby|read replica|user|concurrent|rps|traffic|web|mobile|api|erp|portal|cloud|budget|เซิร์ฟเวอร์|สเปก|ซีพียู|แรม|หน่วยความจำ|ดิสก์|พื้นที่จัดเก็บ|ฐานข้อมูล|เครือข่าย|ผู้ใช้|ทราฟฟิก|โหลดบาลานเซอร์|แอป|เว็บ|เว็ป|สำรอง|งบ|งบประมาณ|บาท|active standby|replica|ทั้งประเทศ|ทั่วไทย|ระดับประเทศ)/i;
+const WEB_WORKLOAD_REGEX =
+  /(web|website|landing|portal|wordpress|cms|หน้าเว็บ|เว็บ|เว็ป|เว็บแอป|เว็บไซต์)/i;
+const BUDGET_CUE_REGEX =
+  /(งบ|งบประมาณ|budget|บาท|baht|thb)/i;
+const STATIC_WEB_BUDGET_THRESHOLD = 2500;
 
 const CATEGORY = {
   compute: "Compute",
@@ -13,6 +18,246 @@ const CATEGORY = {
   network: "Network",
   security: "Security",
   management: "Management",
+};
+
+const BUDGET_STARTER_TEMPLATES = {
+  staticWeb: {
+    aws: [
+      {
+        category: CATEGORY.storage,
+        service: "Amazon S3",
+        spec: "Static website hosting (50GB storage + basic requests)",
+        unit: "Package/Month",
+        qty: 1,
+        price: 280,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Amazon CloudFront",
+        spec: "CDN + transfer for low traffic website",
+        unit: "Package/Month",
+        qty: 1,
+        price: 420,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Amazon Route 53",
+        spec: "Public DNS hosted zone",
+        unit: "Zone/Month",
+        qty: 1,
+        price: 90,
+      },
+      {
+        category: CATEGORY.security,
+        service: "AWS WAF",
+        spec: "Basic managed rule set",
+        unit: "Policy/Month",
+        qty: 1,
+        price: 220,
+      },
+    ],
+    azure: [
+      {
+        category: CATEGORY.storage,
+        service: "Azure Blob Storage",
+        spec: "Static website hosting (50GB storage + basic requests)",
+        unit: "Package/Month",
+        qty: 1,
+        price: 300,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Azure Front Door",
+        spec: "CDN + transfer for low traffic website",
+        unit: "Package/Month",
+        qty: 1,
+        price: 430,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Azure DNS",
+        spec: "Public DNS zone",
+        unit: "Zone/Month",
+        qty: 1,
+        price: 95,
+      },
+      {
+        category: CATEGORY.security,
+        service: "Azure WAF",
+        spec: "Basic managed rule set",
+        unit: "Policy/Month",
+        qty: 1,
+        price: 230,
+      },
+    ],
+    huawei: [
+      {
+        category: CATEGORY.storage,
+        service: "Huawei OBS",
+        spec: "Static website hosting (50GB storage + basic requests)",
+        unit: "Package/Month",
+        qty: 1,
+        price: 250,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Huawei CDN",
+        spec: "CDN + transfer for low traffic website",
+        unit: "Package/Month",
+        qty: 1,
+        price: 360,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Huawei DNS",
+        spec: "Public DNS zone",
+        unit: "Zone/Month",
+        qty: 1,
+        price: 80,
+      },
+      {
+        category: CATEGORY.security,
+        service: "Huawei Cloud WAF",
+        spec: "Basic managed rule set",
+        unit: "Policy/Month",
+        qty: 1,
+        price: 190,
+      },
+    ],
+  },
+  vmWeb: {
+    aws: [
+      {
+        category: CATEGORY.compute,
+        service: "Amazon EC2",
+        spec: "t4g.small (2 vCPU, 2GB RAM) - Linux",
+        unit: "Instance/Month",
+        qty: 1,
+        price: 1050,
+      },
+      {
+        category: CATEGORY.storage,
+        service: "Amazon EBS",
+        spec: "gp3 SSD 120GB",
+        unit: "Volume/Month",
+        qty: 1,
+        price: 340,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Amazon CloudFront",
+        spec: "CDN + transfer for small web app",
+        unit: "Package/Month",
+        qty: 1,
+        price: 620,
+      },
+      {
+        category: CATEGORY.security,
+        service: "AWS WAF",
+        spec: "Basic managed rule set",
+        unit: "Policy/Month",
+        qty: 1,
+        price: 260,
+      },
+      {
+        category: CATEGORY.management,
+        service: "Amazon CloudWatch",
+        spec: "Basic logs and monitoring",
+        unit: "Workspace/Month",
+        qty: 1,
+        price: 180,
+      },
+    ],
+    azure: [
+      {
+        category: CATEGORY.compute,
+        service: "Azure Virtual Machines",
+        spec: "B2s (2 vCPU, 4GB RAM) - Linux",
+        unit: "Instance/Month",
+        qty: 1,
+        price: 1120,
+      },
+      {
+        category: CATEGORY.storage,
+        service: "Azure Managed Disks",
+        spec: "Premium SSD 128GB",
+        unit: "Disk/Month",
+        qty: 1,
+        price: 360,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Azure Front Door",
+        spec: "CDN + transfer for small web app",
+        unit: "Package/Month",
+        qty: 1,
+        price: 650,
+      },
+      {
+        category: CATEGORY.security,
+        service: "Azure WAF",
+        spec: "Basic managed rule set",
+        unit: "Policy/Month",
+        qty: 1,
+        price: 280,
+      },
+      {
+        category: CATEGORY.management,
+        service: "Azure Monitor",
+        spec: "Basic logs and monitoring",
+        unit: "Workspace/Month",
+        qty: 1,
+        price: 190,
+      },
+    ],
+    huawei: [
+      {
+        category: CATEGORY.compute,
+        service: "Huawei ECS",
+        spec: "s6.small.2 (2 vCPU, 4GB RAM) - Linux",
+        unit: "Instance/Month",
+        qty: 1,
+        price: 960,
+      },
+      {
+        category: CATEGORY.storage,
+        service: "Huawei EVS",
+        spec: "SSD 120GB",
+        unit: "Volume/Month",
+        qty: 1,
+        price: 320,
+      },
+      {
+        category: CATEGORY.network,
+        service: "Huawei CDN",
+        spec: "CDN + transfer for small web app",
+        unit: "Package/Month",
+        qty: 1,
+        price: 560,
+      },
+      {
+        category: CATEGORY.security,
+        service: "Huawei Cloud WAF",
+        spec: "Basic managed rule set",
+        unit: "Policy/Month",
+        qty: 1,
+        price: 230,
+      },
+      {
+        category: CATEGORY.management,
+        service: "Huawei Cloud Eye",
+        spec: "Basic logs and monitoring",
+        unit: "Workspace/Month",
+        qty: 1,
+        price: 170,
+      },
+    ],
+  },
+};
+
+const BUDGET_STARTER_POLICY = {
+  staticWeb: { minTotal: 650, multipliers: { aws: 1.0, azure: 1.06, huawei: 0.9 } },
+  vmWeb: { minTotal: 2200, multipliers: { aws: 1.15, azure: 1.25, huawei: 1.05 } },
 };
 
 const BASELINE_MIN_TOTAL = 160000;
@@ -101,6 +346,79 @@ const recalc = (item) => {
   item.qty = Math.max(1, toNumber(item.qty, 1));
   item.price = Math.max(0, round2(item.price));
   item.total = round2(item.qty * item.price);
+};
+
+const parseBudgetNumber = (raw) => {
+  const value = String(raw || "")
+    .toLowerCase()
+    .replace(/[, ]+/g, "")
+    .trim();
+  if (!value) return null;
+
+  const scaled = value.match(/^(\d+(?:\.\d+)?)(k|m)$/i);
+  if (scaled) {
+    const amount = toNumber(scaled[1], 0);
+    const multiplier = scaled[2].toLowerCase() === "m" ? 1_000_000 : 1_000;
+    return amount > 0 ? amount * multiplier : null;
+  }
+
+  const amount = toNumber(value, null);
+  return amount && amount > 0 ? amount : null;
+};
+
+const extractBudgetThb = (text = "") => {
+  const normalized = String(text || "").trim();
+  if (!normalized || !BUDGET_CUE_REGEX.test(normalized)) return null;
+
+  const patterns = [
+    /(งบ(?:ประมาณ)?|budget)\s*(?:ไม่เกิน|ประมาณ|ราวๆ|around|about|<=|<|=)?\s*([\d.,]+\s*[kKmM]?)/i,
+    /([\d.,]+\s*[kKmM]?)\s*(?:บาท|baht|thb)/i,
+    /budget\s*([\d.,]+\s*[kKmM]?)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) continue;
+    const rawBudget = match
+      .slice(1)
+      .find((part) => typeof part === "string" && /\d/.test(part));
+    const parsed = parseBudgetNumber(rawBudget);
+    if (parsed) return parsed;
+  }
+
+  return null;
+};
+
+const scaleStarterItems = (templateItems = [], targetTotal = 0) => {
+  const base = templateItems.map((item) => ({
+    id: 0,
+    category: item.category,
+    service: item.service,
+    spec: item.spec,
+    unit: item.unit,
+    qty: Math.max(1, toNumber(item.qty, 1)),
+    price: round2(item.price),
+    total: 0,
+  }));
+
+  base.forEach(recalc);
+  const baseTotal = sumTotal(base);
+  const scale = baseTotal > 0 ? Math.min(1.8, Math.max(0.55, targetTotal / baseTotal)) : 1;
+
+  base.forEach((item, idx) => {
+    item.price = round2(item.price * scale);
+    item.id = idx + 1;
+    recalc(item);
+  });
+
+  return base;
+};
+
+const detectStarterProfile = (text = "", budget = 0) => {
+  if (!WEB_WORKLOAD_REGEX.test(text)) {
+    return budget <= STATIC_WEB_BUDGET_THRESHOLD ? "staticWeb" : "vmWeb";
+  }
+  return budget <= STATIC_WEB_BUDGET_THRESHOLD ? "staticWeb" : "vmWeb";
 };
 
 const upsertByCategory = (items, category, baseline) => {
@@ -262,6 +580,39 @@ export const needsRequirementClarification = ({ messages = [], bom = null }) => 
   if (!hasSignal && !hasNumber && tokenCount <= 4) return true;
   if (!hasSignal && !hasNumber && latest.length < 24) return true;
   return false;
+};
+
+export const buildBudgetStarterBom = ({ messages = [], bom = null }) => {
+  if (hasBomItems(bom)) return null;
+
+  const latest = getLastUserMessageText(messages).trim();
+  if (!latest) return null;
+
+  const budgetThb = extractBudgetThb(latest);
+  if (!budgetThb) return null;
+
+  const profile = detectStarterProfile(latest, budgetThb);
+  const templateByProvider = BUDGET_STARTER_TEMPLATES[profile];
+  const policy = BUDGET_STARTER_POLICY[profile];
+  if (!templateByProvider || !policy) return null;
+
+  const nextBom = {};
+  for (const provider of PROVIDERS) {
+    const template = templateByProvider[provider];
+    if (!Array.isArray(template) || template.length === 0) {
+      nextBom[provider] = [];
+      continue;
+    }
+    const multiplier = toNumber(policy.multipliers?.[provider], 1);
+    const targetTotal = Math.max(policy.minTotal || 0, round2(budgetThb * multiplier));
+    nextBom[provider] = scaleStarterItems(template, targetTotal);
+  }
+
+  return {
+    budgetThb: round2(budgetThb),
+    profile,
+    bom: nextBom,
+  };
 };
 
 export const applySizingPolicy = ({ bom, summary = "", contextText = "" }) => {
