@@ -6,7 +6,7 @@ import {
   parseJsonBody,
   safeParseJson,
 } from "./_openai.js";
-import { applySizingPolicy } from "./_capacityPolicy.js";
+import { applySizingPolicy, normalizeBomCurrency } from "./_capacityPolicy.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return jsonResponse(res, 405, { error: "Method not allowed" });
@@ -19,14 +19,18 @@ export default async function handler(req, res) {
     const data = await callOpenAI(createAnalyzePayload({ text }));
     const outputText = extractOutput(data);
     const parsed = safeParseJson(outputText) || { summary: "Response parsing failed.", bom: null };
+    const normalized = normalizeBomCurrency({
+      bom: parsed?.bom || null,
+      summary: parsed?.summary || "",
+    });
     const adjusted =
-      parsed?.bom && typeof parsed.bom === "object"
+      normalized?.bom && typeof normalized.bom === "object"
         ? applySizingPolicy({
-            bom: parsed.bom,
+            bom: normalized.bom,
             summary: parsed.summary || "Analysis complete.",
             contextText: text,
           })
-        : { bom: parsed.bom || null, summary: parsed.summary || "Analysis complete." };
+        : { bom: normalized.bom || null, summary: parsed.summary || "Analysis complete." };
 
     return jsonResponse(res, 200, {
       summary: adjusted.summary,

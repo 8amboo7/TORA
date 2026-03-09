@@ -8,8 +8,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const PROMPT_ID =
   process.env.OPENAI_PROMPT_ID ||
-  "pmpt_6964c225bd488193a15045e75d0e25680790c8d1f4a7f51a";
-const PROMPT_VERSION = process.env.OPENAI_PROMPT_VERSION || "7";
+  "pmpt_69ae83968ddc81968640337397993dce01b28594228caf16";
+const PROMPT_VERSION = process.env.OPENAI_PROMPT_VERSION || "2";
 
 export const jsonResponse = (res, status, payload) =>
   res.status(status).json(payload);
@@ -196,7 +196,6 @@ export const callOpenAI = async (payload) => {
 
 export const createAnalyzePayload = ({ text }) => ({
   prompt: { id: PROMPT_ID, version: PROMPT_VERSION },
-  temperature: 0.4,
   text: { format: buildResponseFormat() },
   input: [
     ...(isNationalScaleRequest(text)
@@ -219,7 +218,6 @@ export const createChatPayload = ({ messages = [], bom = null }) => {
 
   return {
     prompt: { id: PROMPT_ID, version: PROMPT_VERSION },
-    temperature: 0.6,
     text: { format: buildResponseFormat() },
     input: [
       ...(isSmallTalk

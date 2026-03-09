@@ -4,6 +4,7 @@ import {
   applySizingPolicy,
   collectUserMessagesText,
   isNationalScaleRequest,
+  normalizeBomCurrency,
   shouldLockBomForChat,
 } from "./api/_capacityPolicy.js";
 
@@ -13,8 +14,8 @@ const PORT = process.env.PORT || 3001;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const PROMPT_ID =
-  process.env.OPENAI_PROMPT_ID || "pmpt_6964c225bd488193a15045e75d0e25680790c8d1f4a7f51a";
-const PROMPT_VERSION = process.env.OPENAI_PROMPT_VERSION || "7";
+  process.env.OPENAI_PROMPT_ID || "pmpt_69ae83968ddc81968640337397993dce01b28594228caf16";
+const PROMPT_VERSION = process.env.OPENAI_PROMPT_VERSION || "2";
 
 const jsonResponse = (res, status, payload) => {
   const body = JSON.stringify(payload);
@@ -221,7 +222,6 @@ const handleAnalyze = async (req, res) => {
 
   const payload = {
     prompt: { id: PROMPT_ID, version: PROMPT_VERSION },
-    temperature: 0.4,
     text: {
       format: buildResponseFormat(),
     },
@@ -240,14 +240,18 @@ const handleAnalyze = async (req, res) => {
   const outputText = extractOutput(data);
   const parsed =
     safeParseJson(outputText) || { summary: "Response parsing failed.", bom: null };
+  const normalized = normalizeBomCurrency({
+    bom: parsed?.bom || null,
+    summary: parsed?.summary || "",
+  });
   const adjusted =
-    parsed?.bom && typeof parsed.bom === "object"
+    normalized?.bom && typeof normalized.bom === "object"
       ? applySizingPolicy({
-          bom: parsed.bom,
+          bom: normalized.bom,
           summary: parsed.summary || "Analysis complete.",
           contextText: text,
         })
-      : { bom: parsed.bom || null, summary: parsed.summary || "Analysis complete." };
+      : { bom: normalized.bom || null, summary: parsed.summary || "Analysis complete." };
 
   return jsonResponse(res, 200, {
     summary: adjusted.summary,
@@ -259,12 +263,12 @@ const handleAnalyze = async (req, res) => {
 const handleChat = async (req, res) => {
   const body = await parseBody(req);
   const { messages = [], bom = null } = body;
+  const normalizedCurrentBom = normalizeBomCurrency({ bom }).bom || null;
   const chatContext = collectUserMessagesText(messages);
-  const isSmallTalk = shouldLockBomForChat(messages, bom);
+  const isSmallTalk = shouldLockBomForChat(messages, normalizedCurrentBom);
 
   const payload = {
     prompt: { id: PROMPT_ID, version: PROMPT_VERSION },
-    temperature: 0.6,
     text: {
       format: buildResponseFormat(),
     },
@@ -276,7 +280,7 @@ const handleChat = async (req, res) => {
       {
         role: "user",
         content: `Current BOM context: ${JSON.stringify(
-          bom || {}
+          normalizedCurrentBom || {}
         )}`,
       },
       ...messages,
@@ -291,24 +295,28 @@ const handleChat = async (req, res) => {
     return jsonResponse(res, 200, {
       message:
         "รับทราบค่ะ แต่ยังไม่เห็นรายละเอียดที่ต้องการปรับใน BOM รบกวนบอกจำนวนเครื่อง ขนาดสเปก หรือพื้นที่จัดเก็บเพิ่มเติมได้นะคะ",
-      bom: bom || null,
+      bom: normalizedCurrentBom,
       raw: outputText || null,
     });
   }
 
   const initialMessage = parsed.summary || parsed.message || "Analysis complete.";
+  const normalizedResponseBom = normalizeBomCurrency({
+    bom: parsed?.bom || null,
+    summary: initialMessage,
+  }).bom;
   const adjusted =
-    parsed?.bom && typeof parsed.bom === "object"
+    normalizedResponseBom && typeof normalizedResponseBom === "object"
       ? applySizingPolicy({
-          bom: parsed.bom,
+          bom: normalizedResponseBom,
           summary: initialMessage,
           contextText: chatContext,
         })
-      : { bom: parsed.bom || null, summary: initialMessage };
+      : { bom: normalizedResponseBom || null, summary: initialMessage };
 
   return jsonResponse(res, 200, {
     message: adjusted.summary,
-    bom: isSmallTalk ? bom || null : adjusted.bom,
+    bom: isSmallTalk ? normalizedCurrentBom : adjusted.bom,
     raw: null,
   });
 };

@@ -11,6 +11,7 @@ import {
   buildBudgetStarterBom,
   collectUserMessagesText,
   needsRequirementClarification,
+  normalizeBomCurrency,
   shouldLockBomForChat,
 } from "./_capacityPolicy.js";
 
@@ -20,14 +21,15 @@ export default async function handler(req, res) {
   try {
     const body = await parseJsonBody(req);
     const { messages = [], bom = null } = body;
-    const isSmallTalk = shouldLockBomForChat(messages, bom);
+    const normalizedCurrentBom = normalizeBomCurrency({ bom }).bom || null;
+    const isSmallTalk = shouldLockBomForChat(messages, normalizedCurrentBom);
 
-    const data = await callOpenAI(createChatPayload({ messages, bom }));
+    const data = await callOpenAI(createChatPayload({ messages, bom: normalizedCurrentBom }));
     const outputText = extractOutput(data);
     const parsed = safeParseJson(outputText);
 
     if (!parsed) {
-      const budgetStarter = buildBudgetStarterBom({ messages, bom });
+      const budgetStarter = buildBudgetStarterBom({ messages, bom: normalizedCurrentBom });
       if (budgetStarter?.bom) {
         const budgetText = Number(budgetStarter.budgetThb || 0).toLocaleString("th-TH", {
           minimumFractionDigits: 0,
@@ -45,11 +47,11 @@ export default async function handler(req, res) {
         });
       }
 
-      if (!needsRequirementClarification({ messages, bom })) {
+      if (!needsRequirementClarification({ messages, bom: normalizedCurrentBom })) {
         return jsonResponse(res, 200, {
           message:
             "รับทราบค่ะ ระบบคง BOM เดิมไว้ก่อนในรอบนี้ หากต้องการปรับทันทีรบกวนระบุรายการที่อยากเพิ่มหรือลด เช่น จำนวนเครื่อง ขนาด CPU/RAM หรือพื้นที่จัดเก็บค่ะ",
-          bom: bom || null,
+          bom: normalizedCurrentBom,
           raw: outputText || null,
         });
       }
@@ -57,24 +59,28 @@ export default async function handler(req, res) {
       return jsonResponse(res, 200, {
         message:
           "รับทราบค่ะ แต่ยังไม่เห็นรายละเอียดที่ต้องการปรับใน BOM รบกวนบอกจำนวนเครื่อง ขนาดสเปก หรือพื้นที่จัดเก็บเพิ่มเติมได้นะคะ",
-        bom: bom || null,
+        bom: normalizedCurrentBom,
         raw: outputText || null,
       });
     }
 
     const initialMessage = parsed.summary || parsed.message || "Analysis complete.";
+    const normalizedResponseBom = normalizeBomCurrency({
+      bom: parsed?.bom || null,
+      summary: initialMessage,
+    }).bom;
     const adjusted =
-      parsed?.bom && typeof parsed.bom === "object"
+      normalizedResponseBom && typeof normalizedResponseBom === "object"
         ? applySizingPolicy({
-            bom: parsed.bom,
+            bom: normalizedResponseBom,
             summary: initialMessage,
             contextText: collectUserMessagesText(messages),
           })
-        : { bom: parsed.bom || null, summary: initialMessage };
+        : { bom: normalizedResponseBom || null, summary: initialMessage };
 
     return jsonResponse(res, 200, {
       message: adjusted.summary,
-      bom: isSmallTalk ? bom || null : adjusted.bom,
+      bom: isSmallTalk ? normalizedCurrentBom : adjusted.bom,
       raw: null,
     });
   } catch (err) {

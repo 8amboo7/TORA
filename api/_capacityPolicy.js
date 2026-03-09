@@ -1,4 +1,7 @@
 const PROVIDERS = ["aws", "azure", "huawei"];
+const USD_TO_THB = 33;
+const USD_HINT_REGEX = /(?:\busd\b|\bus\$\b|\bdollars?\b|\$)/i;
+const THB_HINT_REGEX = /(?:\bthb\b|\bbaht\b|บาท|฿)/i;
 const NATIONAL_INTENT_REGEX =
   /(ทั้งประเทศ|ทั่วประเทศ|ทั่วไทย|ระดับประเทศ|nationwide|national|country-?wide|all\s+thai(?:land)?\s+users|รองรับ.*ทั้งประเทศ|ประชาชนทั้งประเทศ|คนไทยทั้งประเทศ)/i;
 const SMALLTALK_REGEX =
@@ -348,6 +351,15 @@ const recalc = (item) => {
   item.total = round2(item.qty * item.price);
 };
 
+const replaceCurrencyHintToThb = (value) => {
+  if (typeof value !== "string") return value;
+  return value
+    .replace(/\bUS\$\b/gi, "THB")
+    .replace(/\bUSD\b/gi, "THB")
+    .replace(/\bdollars?\b/gi, "บาท")
+    .replace(/\$/g, "THB ");
+};
+
 const parseBudgetNumber = (raw) => {
   const value = String(raw || "")
     .toLowerCase()
@@ -636,4 +648,58 @@ export const applySizingPolicy = ({ bom, summary = "", contextText = "" }) => {
     : [summary, note].filter(Boolean).join(" ");
 
   return { bom: nextBom, summary: nextSummary, policyApplied: true };
+};
+
+export const normalizeBomCurrency = ({ bom, summary = "", fx = USD_TO_THB }) => {
+  if (!bom || typeof bom !== "object") {
+    return { bom, converted: false };
+  }
+
+  const fxRate = Math.max(0.0001, toNumber(fx, USD_TO_THB));
+  const forceUsdAllItems = USD_HINT_REGEX.test(String(summary || "")) && !THB_HINT_REGEX.test(String(summary || ""));
+
+  let converted = false;
+  const nextBom = {};
+
+  for (const provider of PROVIDERS) {
+    const sourceItems = Array.isArray(bom[provider]) ? bom[provider] : [];
+    nextBom[provider] = sourceItems.map((rawItem, idx) => {
+      const item = { ...rawItem };
+      const itemText = [
+        item?.currency,
+        item?.unit,
+        item?.spec,
+        item?.service,
+        item?.note,
+        item?.description,
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      const hasUsdHint = USD_HINT_REGEX.test(itemText);
+      const hasThbHint = THB_HINT_REGEX.test(itemText);
+      const shouldConvert = forceUsdAllItems || (hasUsdHint && !hasThbHint);
+
+      const qty = Math.max(1, toNumber(item?.qty, 1));
+      let price = Math.max(0, round2(item?.price));
+
+      if (shouldConvert) {
+        converted = true;
+        price = round2(price * fxRate);
+      }
+
+      return {
+        ...item,
+        id: toNumber(item?.id, idx + 1),
+        qty,
+        price,
+        total: round2(qty * price),
+        unit: shouldConvert ? replaceCurrencyHintToThb(item?.unit) : item?.unit,
+        spec: shouldConvert ? replaceCurrencyHintToThb(item?.spec) : item?.spec,
+        currency: shouldConvert ? "THB" : item?.currency,
+      };
+    });
+  }
+
+  return { bom: nextBom, converted };
 };
