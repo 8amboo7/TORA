@@ -391,6 +391,7 @@ const extractSvgDimensions = (svgText) => {
 const MermaidDiagram = memo(({ chart, exportFileName = "diagram" }) => {
   const [svg, setSvg] = useState("");
   const [zoom, setZoom] = useState(DEFAULT_DIAGRAM_ZOOM);
+  const [exportFormat, setExportFormat] = useState("svg");
   const viewportRef = useRef(null);
   const zoomRef = useRef(DEFAULT_DIAGRAM_ZOOM);
   const svgDimensions = useMemo(() => extractSvgDimensions(svg), [svg]);
@@ -485,19 +486,51 @@ const MermaidDiagram = memo(({ chart, exportFileName = "diagram" }) => {
     setZoom((prev) => clampZoom(prev + direction * dynamicStep));
   };
 
-  const handleExportDiagram = () => {
+  const handleExportDiagram = async () => {
     if (!svg) return;
-    const blob = new Blob([svg], {
-      type: "image/svg+xml;charset=utf-8",
+    const fileBase = sanitizeFileNameSegment(exportFileName);
+
+    if (exportFormat === "svg") {
+      const blob = new Blob([svg], {
+        type: "image/svg+xml;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${fileBase}.svg`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      return;
+    }
+
+    const encodedSvg = encodeURIComponent(svg);
+    const img = new Image();
+    img.decoding = "async";
+    img.src = `data:image/svg+xml;charset=utf-8,${encodedSvg}`;
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
     });
-    const url = URL.createObjectURL(blob);
+
+    const width = Math.max(1, Math.round(svgDimensions.width));
+    const height = Math.max(1, Math.round(svgDimensions.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.clearRect(0, 0, width, height);
+    context.drawImage(img, 0, 0, width, height);
+
+    const pngUrl = canvas.toDataURL("image/png");
     const link = document.createElement("a");
-    link.href = url;
-    link.download = `${sanitizeFileNameSegment(exportFileName)}.svg`;
+    link.href = pngUrl;
+    link.download = `${fileBase}.png`;
     document.body.appendChild(link);
     link.click();
     link.remove();
-    URL.revokeObjectURL(url);
   };
 
   if (!svg) {
@@ -524,11 +557,20 @@ const MermaidDiagram = memo(({ chart, exportFileName = "diagram" }) => {
             type="button"
             onClick={handleExportDiagram}
             className="h-9 px-2 rounded border border-gray-200 text-gray-700 hover:bg-gray-50 text-[11px] font-medium inline-flex items-center gap-1"
-            title="Export diagram as SVG"
+            title={`Export diagram as ${exportFormat.toUpperCase()}`}
           >
             <i className="fas fa-file-export"></i>
             Export Diagram
           </button>
+          <select
+            value={exportFormat}
+            onChange={(event) => setExportFormat(event.target.value)}
+            className="h-9 px-2 rounded border border-gray-200 text-gray-700 bg-white text-[11px] font-medium"
+            aria-label="Diagram export format"
+          >
+            <option value="svg">SVG</option>
+            <option value="png">PNG</option>
+          </select>
           <div className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-white p-1 shadow-sm">
             <button
               type="button"
@@ -1036,34 +1078,94 @@ export default function App() {
   };
 
   const handleExport = () => {
+    const workbook = XLSX.utils.book_new();
+
+    const providers = [
+      { id: "aws", name: "AWS" },
+      { id: "azure", name: "Azure" },
+      { id: "huawei", name: "Huawei" },
+    ];
+    const reportDate = new Date().toISOString().slice(0, 10);
     const headers = [
       "Category",
       "Service",
       "Specification",
       "Unit",
       "Qty",
-      "Price/Unit",
-      "Total Price",
+      "Price/Unit (THB)",
+      "Total Price (THB)",
     ];
-    const rows = bomData[activeTab].map((item) => [
-      item.category,
-      item.service,
-      item.spec,
-      item.unit,
-      item.qty,
-      item.price,
-      item.total,
-    ]);
 
-    const sheetData = [headers, ...rows];
-    const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "BOM");
+    for (const provider of providers) {
+      const items = bomData[provider.id] || [];
+      const rows = items.map((item) => [
+        item.category,
+        item.service,
+        item.spec,
+        item.unit,
+        Number(item.qty) || 0,
+        Number(item.price) || 0,
+        Number(item.total) || 0,
+      ]);
+      const monthlyTotal = rows.reduce((sum, row) => sum + (Number(row[6]) || 0), 0);
+      const yearlyTotal = monthlyTotal * 12;
+      const sheetData = [
+        [`${provider.name} Bill of Materials`],
+        [`Export Date: ${reportDate}`],
+        [`Region: ${getDefaultRegionLabel(provider.id)}`],
+        [],
+        headers,
+        ...rows,
+        [],
+        ["", "", "", "", "", "Monthly Total (THB)", monthlyTotal],
+        ["", "", "", "", "", "Yearly Total (THB)", yearlyTotal],
+      ];
+      const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
+
+      const headerRow = 5;
+      const dataStartRow = 6;
+      const dataEndRow = dataStartRow + rows.length - 1;
+      const totalsStartRow = dataEndRow + 2;
+
+      worksheet["!cols"] = [
+        { wch: 16 },
+        { wch: 34 },
+        { wch: 46 },
+        { wch: 14 },
+        { wch: 8 },
+        { wch: 18 },
+        { wch: 18 },
+      ];
+      worksheet["!merges"] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 6 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 6 } },
+        { s: { r: 2, c: 0 }, e: { r: 2, c: 6 } },
+      ];
+
+      worksheet["!autofilter"] = {
+        ref: `A${headerRow}:G${Math.max(headerRow, dataEndRow)}`,
+      };
+
+      for (let row = dataStartRow; row <= dataEndRow; row += 1) {
+        const qtyCell = worksheet[`E${row}`];
+        const priceCell = worksheet[`F${row}`];
+        const totalCell = worksheet[`G${row}`];
+        if (qtyCell) qtyCell.z = "#,##0";
+        if (priceCell) priceCell.z = "#,##0.00";
+        if (totalCell) totalCell.z = "#,##0.00";
+      }
+
+      const monthlyCell = worksheet[`G${totalsStartRow}`];
+      const yearlyCell = worksheet[`G${totalsStartRow + 1}`];
+      if (monthlyCell) monthlyCell.z = "#,##0.00";
+      if (yearlyCell) yearlyCell.z = "#,##0.00";
+
+      XLSX.utils.book_append_sheet(workbook, worksheet, provider.name);
+    }
+
     XLSX.writeFile(
       workbook,
-      `BOM_Export_${activeTab.toUpperCase()}_${new Date()
-        .toISOString()
-        .slice(0, 10)}.xlsx`,
+      `BOM_Export_ALL_${reportDate}.xlsx`,
     );
   };
 
