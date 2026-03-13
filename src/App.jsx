@@ -4,8 +4,11 @@ import Tesseract from "tesseract.js";
 import JSZip from "jszip";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
-import toraLogo from "./assets/tora-logo-Cag_-YQf.png";
+import toraLogo from "./assets/logo.jpg";
 import huaweiLogo from "./assets/huawei-logo2.png";
+import awsPriceData from "../aws-price-final.json";
+import azurePriceData from "../azure-price-final.json";
+import huaweiPriceData from "../huawei-price-final.json";
 
 let mermaidLoader = null;
 
@@ -670,6 +673,29 @@ const formatBaht = (value) =>
     maximumFractionDigits: 2,
   })} `;
 
+const formatPriceUnit = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return value || "-";
+  return num.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  });
+};
+
+const PRICE_SORT_OPTIONS = [
+  { id: "service_name", label: "Service Name" },
+  { id: "PricePerUnit", label: "Price / Unit" },
+  { id: "region", label: "Region" },
+  { id: "product_family", label: "Product Family" },
+  { id: "sku", label: "SKU" },
+];
+
+const PRICING_DATA = {
+  aws: awsPriceData,
+  azure: azurePriceData,
+  huawei: huaweiPriceData,
+};
+
 const createBomFingerprint = (bom) =>
   JSON.stringify(
     BOM_PROVIDERS.map((provider) =>
@@ -688,6 +714,14 @@ const createBomFingerprint = (bom) =>
 export default function App() {
   const [currentView, setCurrentView] = useState("dashboard");
   const [activeTab, setActiveTab] = useState("aws");
+  const [pricingProvider, setPricingProvider] = useState("aws");
+  const [pricingSearch, setPricingSearch] = useState("");
+  const [pricingRegion, setPricingRegion] = useState("all");
+  const [pricingFamily, setPricingFamily] = useState("all");
+  const [pricingSortKey, setPricingSortKey] = useState("service_name");
+  const [pricingSortDir, setPricingSortDir] = useState("asc");
+  const [pricingPage, setPricingPage] = useState(1);
+  const pricingPageSize = 50;
   const [isProcessing, setIsProcessing] = useState(false);
   const [activeProcessType, setActiveProcessType] = useState(null);
   const [projectTitle, setProjectTitle] = useState("");
@@ -1217,7 +1251,18 @@ export default function App() {
           >
             Documentation
           </a>
-          <a href="#" className="hover:text-gray-900 transition-colors">
+          <a
+            href="#"
+            onClick={(event) => {
+              event.preventDefault();
+              setCurrentView("pricing");
+            }}
+            className={`transition-colors ${
+              currentView === "pricing"
+                ? "text-[#0f172a] font-semibold"
+                : "hover:text-gray-900"
+            }`}
+          >
             Pricing Data
           </a>
         </div>
@@ -1515,6 +1560,420 @@ export default function App() {
       </div>
     </div>
   );
+
+  const PricingDataView = () => {
+    const currentData = PRICING_DATA[pricingProvider] || [];
+    const searchQuery = pricingSearch.trim().toLowerCase();
+    const collator = useMemo(
+      () => new Intl.Collator("en", { numeric: true, sensitivity: "base" }),
+      [],
+    );
+
+    const regions = useMemo(() => {
+      const set = new Set();
+      currentData.forEach((item) => {
+        if (item?.region) set.add(item.region);
+      });
+      return Array.from(set).sort(collator.compare);
+    }, [currentData, collator]);
+
+    const families = useMemo(() => {
+      const set = new Set();
+      currentData.forEach((item) => {
+        if (item?.product_family) set.add(item.product_family);
+      });
+      return Array.from(set).sort(collator.compare);
+    }, [currentData, collator]);
+
+    useEffect(() => {
+      setPricingPage(1);
+    }, [pricingProvider, pricingSearch, pricingRegion, pricingFamily]);
+
+    const filteredRows = useMemo(() => {
+      const rows = currentData.filter((item) => {
+        if (pricingRegion !== "all" && item.region !== pricingRegion)
+          return false;
+        if (pricingFamily !== "all" && item.product_family !== pricingFamily)
+          return false;
+        if (!searchQuery) return true;
+        const attributeText = item?.attributes
+          ? Object.entries(item.attributes)
+              .map(([key, value]) => `${key}:${value}`)
+              .join(" ")
+          : "";
+        const haystack = [
+          item?.service_name,
+          item?.sku,
+          item?.region,
+          item?.product_family,
+          item?.unit,
+          item?.currency,
+          attributeText,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(searchQuery);
+      });
+
+      const sorted = [...rows].sort((a, b) => {
+        const dir = pricingSortDir === "asc" ? 1 : -1;
+        if (pricingSortKey === "PricePerUnit") {
+          const aNum = Number(a?.PricePerUnit);
+          const bNum = Number(b?.PricePerUnit);
+          if (!Number.isFinite(aNum) && !Number.isFinite(bNum)) return 0;
+          if (!Number.isFinite(aNum)) return 1;
+          if (!Number.isFinite(bNum)) return -1;
+          return (aNum - bNum) * dir;
+        }
+        const aVal = a?.[pricingSortKey] ?? "";
+        const bVal = b?.[pricingSortKey] ?? "";
+        return collator.compare(String(aVal), String(bVal)) * dir;
+      });
+
+      return sorted;
+    }, [
+      currentData,
+      pricingRegion,
+      pricingFamily,
+      searchQuery,
+      pricingSortKey,
+      pricingSortDir,
+      collator,
+    ]);
+
+    const totalRows = filteredRows.length;
+    const totalPages = Math.max(1, Math.ceil(totalRows / pricingPageSize));
+    const safePage = Math.min(pricingPage, totalPages);
+    const pagedRows = filteredRows.slice(
+      (safePage - 1) * pricingPageSize,
+      safePage * pricingPageSize,
+    );
+
+    const uniqueServices = useMemo(() => {
+      const set = new Set();
+      filteredRows.forEach((item) => {
+        if (item?.service_name) set.add(item.service_name);
+      });
+      return set.size;
+    }, [filteredRows]);
+
+    const providerLabel = getProviderLabel(pricingProvider);
+
+    return (
+      <div className="pt-20 min-h-screen bg-gray-50 text-gray-800 fade-in">
+        <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-[#0f172a]">
+                Pricing Data Library
+              </h1>
+              <p className="text-sm text-gray-500">
+                Browse raw pricing inputs by provider, region, and product
+                family. Data is sorted and filterable for quick comparisons.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              {[
+                {
+                  id: "aws",
+                  label: "AWS",
+                  icon: "fab fa-aws",
+                  color: "text-[#FF9900]",
+                },
+                {
+                  id: "azure",
+                  label: "Microsoft Azure",
+                  icon: "fab fa-microsoft",
+                  color: "text-[#0089D6]",
+                },
+                {
+                  id: "huawei",
+                  label: "Huawei Cloud",
+                  logo: huaweiLogo,
+                },
+              ].map((cloud) => (
+                <button
+                  key={cloud.id}
+                  onClick={() => setPricingProvider(cloud.id)}
+                  className={`px-4 py-2 rounded-full text-xs font-semibold border transition-all flex items-center gap-2 ${
+                    pricingProvider === cloud.id
+                      ? "border-[#0f172a] text-[#0f172a] bg-white shadow-sm"
+                      : "border-gray-200 text-gray-500 hover:text-gray-700 bg-white"
+                  }`}
+                >
+                  {cloud.logo ? (
+                    <img
+                      src={cloud.logo}
+                      alt={`${cloud.label} logo`}
+                      className="w-4 h-4 object-contain"
+                    />
+                  ) : (
+                    <i className={`${cloud.icon} ${cloud.color}`}></i>
+                  )}
+                  {cloud.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {[
+              {
+                label: "Provider",
+                value: providerLabel,
+              },
+              {
+                label: "Total SKUs",
+                value: totalRows.toLocaleString("en-US"),
+              },
+              {
+                label: "Unique Services",
+                value: uniqueServices.toLocaleString("en-US"),
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm"
+              >
+                <p className="text-xs uppercase tracking-wider text-gray-400 mb-2">
+                  {item.label}
+                </p>
+                <p className="text-lg font-semibold text-gray-800">
+                  {item.value}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm space-y-4">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-1 flex-col gap-3 md:flex-row">
+                <div className="flex-1">
+                  <label className="text-xs text-gray-500 font-semibold uppercase">
+                    Search
+                  </label>
+                  <input
+                    value={pricingSearch}
+                    onChange={(event) => setPricingSearch(event.target.value)}
+                    placeholder="Search service, SKU, region, attributes..."
+                    className="mt-2 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:border-[#0f172a] focus:ring-1 focus:ring-[#0f172a]"
+                  />
+                </div>
+                <div className="min-w-[180px]">
+                  <label className="text-xs text-gray-500 font-semibold uppercase">
+                    Region
+                  </label>
+                  <select
+                    value={pricingRegion}
+                    onChange={(event) => setPricingRegion(event.target.value)}
+                    className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-[#0f172a] focus:ring-1 focus:ring-[#0f172a]"
+                  >
+                    <option value="all">All Regions</option>
+                    {regions.map((region) => (
+                      <option key={region} value={region}>
+                        {region}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="min-w-[180px]">
+                  <label className="text-xs text-gray-500 font-semibold uppercase">
+                    Product Family
+                  </label>
+                  <select
+                    value={pricingFamily}
+                    onChange={(event) => setPricingFamily(event.target.value)}
+                    className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-[#0f172a] focus:ring-1 focus:ring-[#0f172a]"
+                  >
+                    <option value="all">All Families</option>
+                    {families.map((family) => (
+                      <option key={family} value={family}>
+                        {family}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex gap-3 items-end">
+                <div>
+                  <label className="text-xs text-gray-500 font-semibold uppercase">
+                    Sort By
+                  </label>
+                  <select
+                    value={pricingSortKey}
+                    onChange={(event) => setPricingSortKey(event.target.value)}
+                    className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-[#0f172a] focus:ring-1 focus:ring-[#0f172a]"
+                  >
+                    {PRICE_SORT_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  onClick={() =>
+                    setPricingSortDir((prev) =>
+                      prev === "asc" ? "desc" : "asc",
+                    )
+                  }
+                  className="h-[38px] mt-6 px-3 rounded-lg border border-gray-200 text-sm font-semibold text-gray-600 hover:text-gray-900 hover:border-gray-300"
+                >
+                  {pricingSortDir === "asc" ? "Asc" : "Desc"}
+                </button>
+              </div>
+            </div>
+
+            <div className="text-xs text-gray-500">
+              Showing {pagedRows.length.toLocaleString("en-US")} of{" "}
+              {totalRows.toLocaleString("en-US")} records
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="text-xs text-gray-500 uppercase bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="px-4 py-3 font-semibold min-w-[220px]">
+                      Service
+                    </th>
+                    <th className="px-4 py-3 font-semibold min-w-[180px]">
+                      SKU
+                    </th>
+                    <th className="px-4 py-3 font-semibold min-w-[160px]">
+                      Region
+                    </th>
+                    <th className="px-4 py-3 font-semibold min-w-[140px]">
+                      Product Family
+                    </th>
+                    <th className="px-4 py-3 font-semibold min-w-[110px]">
+                      Unit
+                    </th>
+                    <th className="px-4 py-3 font-semibold text-right min-w-[120px]">
+                      Price / Unit
+                    </th>
+                    <th className="px-4 py-3 font-semibold min-w-[200px]">
+                      Attributes
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {pagedRows.map((item, index) => {
+                    const attributes = item?.attributes || {};
+                    const entries = Object.entries(attributes);
+                    const visible = entries.slice(0, 3);
+                    const remaining = entries.length - visible.length;
+                    return (
+                      <tr
+                        key={`${item?.sku || item?.service_name}-${index}`}
+                        className="hover:bg-gray-50 transition-colors"
+                      >
+                        <td className="px-4 py-3 font-semibold text-gray-800">
+                          {item?.service_name || "-"}
+                        </td>
+                        <td className="px-4 py-3 text-gray-500 font-mono text-xs">
+                          {item?.sku || "-"}
+                        </td>
+                        <td className="px-4 py-3 text-gray-600">
+                          {item?.region || "-"}
+                        </td>
+                        <td className="px-4 py-3 text-gray-600">
+                          {item?.product_family || "-"}
+                        </td>
+                        <td className="px-4 py-3 text-gray-600">
+                          {item?.unit || "-"}
+                        </td>
+                        <td className="px-4 py-3 text-right font-semibold text-gray-900">
+                          {formatPriceUnit(item?.PricePerUnit)} {item?.currency}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap gap-2 text-xs">
+                            {visible.length === 0 && (
+                              <span className="text-gray-400">-</span>
+                            )}
+                            {visible.map(([key, value]) => (
+                              <span
+                                key={key}
+                                className="px-2 py-1 rounded-full bg-gray-100 text-gray-600"
+                              >
+                                {key}: {String(value)}
+                              </span>
+                            ))}
+                            {remaining > 0 && (
+                              <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-500">
+                                +{remaining} more
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 px-4 py-3 border-t border-gray-200 bg-gray-50">
+              <div className="text-xs text-gray-500">
+                Page {safePage} of {totalPages}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setPricingPage(1)}
+                  disabled={safePage === 1}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold border ${
+                    safePage === 1
+                      ? "border-gray-200 text-gray-300 cursor-not-allowed"
+                      : "border-gray-300 text-gray-600 hover:border-gray-400"
+                  }`}
+                >
+                  First
+                </button>
+                <button
+                  onClick={() => setPricingPage((prev) => Math.max(1, prev - 1))}
+                  disabled={safePage === 1}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold border ${
+                    safePage === 1
+                      ? "border-gray-200 text-gray-300 cursor-not-allowed"
+                      : "border-gray-300 text-gray-600 hover:border-gray-400"
+                  }`}
+                >
+                  Prev
+                </button>
+                <button
+                  onClick={() =>
+                    setPricingPage((prev) => Math.min(totalPages, prev + 1))
+                  }
+                  disabled={safePage === totalPages}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold border ${
+                    safePage === totalPages
+                      ? "border-gray-200 text-gray-300 cursor-not-allowed"
+                      : "border-gray-300 text-gray-600 hover:border-gray-400"
+                  }`}
+                >
+                  Next
+                </button>
+                <button
+                  onClick={() => setPricingPage(totalPages)}
+                  disabled={safePage === totalPages}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold border ${
+                    safePage === totalPages
+                      ? "border-gray-200 text-gray-300 cursor-not-allowed"
+                      : "border-gray-300 text-gray-600 hover:border-gray-400"
+                  }`}
+                >
+                  Last
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const ReviewView = () => (
     <div className="pt-20 min-h-screen flex flex-col items-center p-6 bg-white fade-in">
@@ -2112,6 +2571,7 @@ export default function App() {
       {currentView === "workspace" && <WorkspaceView />}
       {currentView === "review" && <ReviewView />}
       {currentView === "documentation" && <DocumentationView />}
+      {currentView === "pricing" && <PricingDataView />}
       {isProcessing && activeProcessType === "upload" && (
         <div className="fixed inset-0 z-50 bg-white/80 backdrop-blur-sm flex flex-col items-center justify-center">
           <div className="w-16 h-16 border-4 border-gray-200 border-t-[#0f172a] rounded-full animate-spin mb-4"></div>
