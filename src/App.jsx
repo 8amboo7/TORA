@@ -721,7 +721,7 @@ export default function App() {
   const [pricingSortKey, setPricingSortKey] = useState("service_name");
   const [pricingSortDir, setPricingSortDir] = useState("asc");
   const [pricingPage, setPricingPage] = useState(1);
-  const pricingPageSize = 50;
+  const [pricingPageSize, setPricingPageSize] = useState(200);
   const [isProcessing, setIsProcessing] = useState(false);
   const [activeProcessType, setActiveProcessType] = useState(null);
   const [projectTitle, setProjectTitle] = useState("");
@@ -952,6 +952,7 @@ export default function App() {
   };
 
   const handleConfirmAnalysis = async () => {
+    setActiveProcessType("analyze");
     setIsProcessing(true);
     setCurrentView("workspace");
     try {
@@ -994,6 +995,7 @@ export default function App() {
       ]);
     } finally {
       setIsProcessing(false);
+      setActiveProcessType(null);
     }
   };
 
@@ -1141,7 +1143,10 @@ export default function App() {
         Number(item.price) || 0,
         Number(item.total) || 0,
       ]);
-      const monthlyTotal = rows.reduce((sum, row) => sum + (Number(row[6]) || 0), 0);
+      const monthlyTotal = rows.reduce(
+        (sum, row) => sum + (Number(row[6]) || 0),
+        0,
+      );
       const yearlyTotal = monthlyTotal * 12;
       const sheetData = [
         [`${provider.name} Bill of Materials`],
@@ -1197,10 +1202,7 @@ export default function App() {
       XLSX.utils.book_append_sheet(workbook, worksheet, provider.name);
     }
 
-    XLSX.writeFile(
-      workbook,
-      `BOM_Export_ALL_${reportDate}.xlsx`,
-    );
+    XLSX.writeFile(workbook, `BOM_Export_ALL_${reportDate}.xlsx`);
   };
 
   const handleClearChat = () => {
@@ -1795,6 +1797,24 @@ export default function App() {
               <div className="flex gap-3 items-end">
                 <div>
                   <label className="text-xs text-gray-500 font-semibold uppercase">
+                    Page Size
+                  </label>
+                  <select
+                    value={pricingPageSize}
+                    onChange={(event) =>
+                      setPricingPageSize(Number(event.target.value))
+                    }
+                    className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-[#0f172a] focus:ring-1 focus:ring-[#0f172a]"
+                  >
+                    {[200, 500].map((size) => (
+                      <option key={size} value={size}>
+                        {size} rows
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 font-semibold uppercase">
                     Sort By
                   </label>
                   <select
@@ -1929,7 +1949,9 @@ export default function App() {
                   First
                 </button>
                 <button
-                  onClick={() => setPricingPage((prev) => Math.max(1, prev - 1))}
+                  onClick={() =>
+                    setPricingPage((prev) => Math.max(1, prev - 1))
+                  }
                   disabled={safePage === 1}
                   className={`px-3 py-1.5 rounded-md text-xs font-semibold border ${
                     safePage === 1
@@ -2015,7 +2037,12 @@ export default function App() {
           </button>
           <button
             onClick={handleConfirmAnalysis}
-            className="px-6 py-2.5 rounded-lg bg-[#0f172a] text-white font-medium hover:bg-[#1e293b] shadow-lg shadow-gray-200 transition-all flex items-center gap-2"
+            disabled={isProcessing && activeProcessType === "analyze"}
+            className={`px-6 py-2.5 rounded-lg font-medium shadow-lg shadow-gray-200 transition-all flex items-center gap-2 ${
+              isProcessing && activeProcessType === "analyze"
+                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                : "bg-[#0f172a] text-white hover:bg-[#1e293b]"
+            }`}
           >
             <i className="fas fa-magic"></i> Confirm & Analyze
           </button>
@@ -2034,7 +2061,7 @@ export default function App() {
         <div className="max-w-6xl mx-auto text-center fade-in">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#0f172a]/5 border border-[#0f172a]/10 text-[#0f172a] text-xs font-bold tracking-wider uppercase mb-6">
             <span className="w-2 h-2 rounded-full bg-[#0f172a]"></span>
-            Enterprise Grade Solution
+            Enterprise Solution by AI
           </div>
           <h1 className="text-5xl md:text-7xl font-extrabold text-[#0f172a] mb-8 tracking-tight leading-tight">
             Smart Procurement <br />
@@ -2254,7 +2281,7 @@ export default function App() {
       .slice(0, 10)}`;
 
     return (
-      <div className="pt-16 h-screen flex flex-col bg-gray-50/50">
+      <div className="pt-16 h-screen flex flex-col bg-gray-50/50 relative">
         <div className="bg-white border-b border-gray-200 px-6 py-3 flex justify-between items-center shadow-sm z-10">
           <div></div>
           <div className="flex gap-3">
@@ -2277,6 +2304,18 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {isProcessing && activeProcessType === "analyze" && (
+          <div className="absolute inset-0 bg-white/85 z-40 flex flex-col items-center justify-center backdrop-blur-sm">
+            <div className="w-16 h-16 border-4 border-gray-200 border-t-[#0f172a] rounded-full animate-spin mb-4"></div>
+            <p className="text-[#0f172a] font-bold text-lg">
+              Analyzing...
+            </p>
+            <p className="text-gray-500 text-sm">
+              Please wait while we process your document.
+            </p>
+          </div>
+        )}
 
         <div className="flex-1 flex overflow-hidden">
           <div className="w-[400px] bg-white border-r border-gray-200 flex flex-col z-20">
